@@ -1,0 +1,60 @@
+cabal-version: 3.0
+name:               DeMoD-Note
+version:            1.0.0
+synopsis:           Deterministic Monophonic Note Detector
+license:            MIT
+author:             DeMoD-Note Project
+homepage:           https://github.com/DeMoD-Note/DeMoD-Note
+build-type:         Simple
+
+library
+  exposed-modules:
+    DeMoDNote.Types
+    DeMoDNote.Config
+    DeMoDNote.Detector
+    DeMoDNote.Backend
+    DeMoDNote.OSC
+    DeMoDNote.Monitor
+    DeMoDNote.Scale
+    DeMoDNote.Arpeggio
+    DeMoDNote.BPM
+    DeMoDNote.Preset
+    DeMoDNote.SoundFont
+    DeMoDNote.TUI
+  hs-source-dirs:     src
+  default-language:   Haskell2010
+  ghc-options:        -Wall -O2 -threaded
+  build-depends:
+    , base                 >=4.18 && <5
+    , vector               ^>=0.13
+    , vector-fftw          ^>=0.1
+    , jack                 ^>=0.7
+    , hosc                 >=0.20 && <0.22
+    , tomland              ^>=1.3
+    , optparse-applicative ^>=0.18
+    , scotty               >=0.20 && <0.23
+    , aeson                ^>=2.2
+    , aeson-pretty         ^>=0.8
+    , async                ^>=2.2
+    , stm                  ^>=2.5
+    , katip                ^>=0.8
+    , bytestring
+    , text
+    , array
+    , unix
+    , brick                >= 2.0
+    , vty                  >=6.0 && <7.0
+    , time
+    , directory
+    , filepath
+    , process
+    , random
+    , containers
+  pkgconfig-depends: jack >=1.9, fftw3
+
+executable demod-note
+  main-is:            Main.hs
+  hs-source-dirs:     app
+  default-language:   Haskell2010
+  ghc-options:        -threaded -rtsopts -O2 -with-rtsopts=-N
+  build-depends:      DeMoD-Note, base, optparse-applicative, katip, async, stm, text

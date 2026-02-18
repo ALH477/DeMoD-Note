@@ -1,0 +1,43 @@
+# DeMoD-Note Configuration
+# Deterministic Monophonic Note Detector
+# Optimized for 16-bit 96kHz audio with sub-3ms latency
+
+[detection]
+algorithm = "Hybrid"
+window = 2048
+hop = 128
+maxPolyphony = 1              # Monophonic root note detection
+onsetThreshDb = -40.0
+fastValidationMs = 2.66       # 2.66ms for 200Hz+ (2 buffers)
+bassFastMs = 12.0             # 12ms for 80-200Hz (9 buffers)
+bassConfirmMs = 30.0          # 30ms for 30-80Hz validation
+pitchBendRange = 2.0          # ±2 semitones correction
+highFreqConf = 0.98           # 98% confidence for fast path
+bassFastConf = 0.85           # 85% confidence for speculative bass
+bassFinalConf = 0.95          # 95% confidence for final validation
+
+[timing]
+sampleRate = 96000
+bufferSize = 128
+maxJitterUs = 500
+quantizeGrid = true
+fluidsynthComp = 5.0          # 5ms FluidSynth internal latency
+
+[rt]
+singleCore = true
+cpuCore = 2
+priorityAudio = 99
+priorityDetect = 98
+memoryLock = true
+
+[onset]
+spectralWeight = 0.4
+energyWeight = 0.4
+phaseWeight = 0.2
+threshold = 0.67              # 0.67 onset sensitivity
+quantize = true
+
+backend = "jack"
+osc.port = 57120
+monitor.port = 8080
+logLevel = "Info"
