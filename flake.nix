@@ -33,6 +33,43 @@
         windows = (pkgs.pkgsCross.mingwW64.haskellPackages.callCabal2nix "DeMoD-Note" self {}).overrideAttrs (old: {
           configureFlags = old.configureFlags or [] ++ ["--enable-executable-static"];
         });
+
+        desktop = pkgs.runCommand "demod-note-desktop" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          mkdir -p $out/bin
+          mkdir -p $out/share/applications
+          
+          # Copy desktop file
+          cp ${./desktop/DeMoD-Note.desktop} $out/share/applications/DeMoD-Note.desktop
+          
+          # Create launcher script
+          cat > $out/bin/DeMoD-Note << 'SCRIPT'
+          #!/usr/bin/env bash
+          cd "$(dirname "$(readlink -f "$0")/../share/DeMoD-Note")"
+          
+          export FLUID_SOUNDFONT="${pkgs.soundfont-fluid}/share/soundfonts/FluidR3_GM.sf2"
+          
+          # Install python deps if needed
+          pip install --user -r requirements.txt 2>/dev/null || true
+          
+          # Start JACK if not running
+          if ! jack_lsp >/dev/null 2>&1; then
+              jackd -d dummy -r 44100 -p 256 &
+              sleep 2
+          fi
+          
+          # Start OSC-MIDI bridge
+          python3 tools/osc-midi-bridge.py &
+          
+          # Start DeMoD-Note
+          cabal run -- run
+          SCRIPT
+          chmod +x $out/bin/DeMoD-Note
+          
+          # Copy share directory
+          cp -r . $out/share/DeMoD-Note/
+        '';
       in {
         packages = {
           default = demod-note;
@@ -40,6 +77,7 @@
           appimage = appimage;
           windows = windows;
           static = pkgs.pkgsMusl.haskellPackages.callCabal2nix "DeMoD-Note" self {};
+          desktop = desktop;
         };
 
         nixosModules.default = { config, lib, pkgs, ... }:
