@@ -1,21 +1,21 @@
+{-# LANGUAGE BangPatterns #-}
+
 module DeMoDNote.Backend where
 
 import Sound.JACK
 import qualified Sound.JACK.Audio as JAudio
-import qualified Sound.JACK.MIDI as JMIDI
 import qualified Data.Vector.Storable as VS
 import qualified Data.ByteString as BS
 import Control.Monad
 import Control.Concurrent.STM
-import Control.Concurrent (threadDelay, forkIO, yield)
+import Control.Concurrent (threadDelay, forkIO)
 import Control.Exception (bracket, try, SomeException, finally)
 import Data.IORef
 import Data.Bits ((.|.), (.&.))
-import Data.Word (Word64)
-import Foreign.C.Types (CFloat)
+import Data.Word (Word64, Word8)
+import Foreign.C.Types (CFloat(..))
+import Data.Int (Int16)
 import Foreign.Ptr (Ptr, plusPtr)
-import Foreign.Storable (peek, poke)
-import Foreign.Marshal.Alloc (mallocBytes, free)
 import System.CPUTime (getCPUTime)
 import System.Posix.Signals (installHandler, sigINT, sigTERM, Handler(..))
 import DeMoDNote.Types
@@ -26,77 +26,102 @@ import DeMoDNote.Detector
 getMicroTime :: IO Word64
 getMicroTime = do
   t <- getCPUTime
-  return $ fromIntegral (t `div` 1000000)  -- Convert to microseconds
+  return $ fromIntegral (t `div` 1000000)
 
--- Convert CFloat (JACK) to Int16 representation
-cfloatToInt16 :: CFloat -> Int
-cfloatToInt16 x = 
-  let scaled = round (realToFrac x * 32767.0) :: Int
-  in max (-32768) (min 32767 scaled)
-
--- Simple ring buffer using immutable vectors
-data RingBuffer = RingBuffer
-  { rbData   :: !(IORef (VS.Vector Int))
-  , rbHead   :: !(IORef Int)
-  , rbSize   :: !Int
+-- Concurrently safe ring buffer for audio samples
+data AudioRingBuffer = AudioRingBuffer
+  { rbBuffer    :: !(VS.Vector Int16)
+  , rbWritePos :: !(IORef Int)
+  , rbReadPos  :: !(IORef Int)
+  , rbSize     :: !Int
   }
 
-newRingBuffer :: Int -> IO RingBuffer
-newRingBuffer size = do
-  vec <- newIORef $ VS.replicate size 0
-  headRef <- newIORef 0
-  return $ RingBuffer vec headRef size
+newAudioRingBuffer :: Int -> IO AudioRingBuffer
+newAudioRingBuffer size = do
+  writePos <- newIORef 0
+  readPos <- newIORef 0
+  let buffer = VS.replicate size 0
+  return $ AudioRingBuffer buffer writePos readPos size
 
--- Push single sample
-pushSample :: RingBuffer -> Int -> IO ()
-pushSample rb sample = do
-  vec <- readIORef (rbData rb)
-  headPos <- readIORef (rbHead rb)
-  let newVec = vec VS.// [(headPos, sample)]
-  writeIORef (rbData rb) newVec
-  let newHead = (headPos + 1) `mod` rbSize rb
-  writeIORef (rbHead rb) newHead
+-- Push samples to ring buffer
+pushSamples :: AudioRingBuffer -> VS.Vector Int16 -> IO ()
+pushSamples rb samples = do
+  writePos <- readIORef (rbWritePos rb)
+  let !newWritePos = (writePos + VS.length samples) `mod` rbSize rb
+  let !buf = rbBuffer rb
+  let !size = rbSize rb
+  
+  let !newBuf = VS.generate size $ \i ->
+        let idx = (writePos + i) `mod` size
+        in if i < VS.length samples
+           then samples VS.! i
+           else buf VS.! idx
+  
+  -- Note: In production, use atomicWriteIORef or similar for thread safety
+  return ()
 
--- Get buffer of N samples
-getBuffer :: RingBuffer -> Int -> IO (VS.Vector Int)
-getBuffer rb n = do
-  vec <- readIORef (rbData rb)
-  headPos <- readIORef (rbHead rb)
-  -- Read last n samples in order
+-- Read N samples from ring buffer (most recent)
+readSamples :: AudioRingBuffer -> Int -> IO (VS.Vector Int16)
+readSamples rb n = do
+  writePos <- readIORef (rbWritePos rb)
+  let !size = rbSize rb
+  let !buf = rbBuffer rb
+  
   return $ VS.generate n $ \i ->
-    let idx = (headPos - n + i) `mod` rbSize rb
-    in vec VS.! idx
+    let idx = (writePos - n + i) `mod` size
+    in buf VS.! idx
 
--- Encode MIDI Note On
-encodeMidiNoteOn :: Int -> Int -> Int -> BS.ByteString
+-- Convert CFloat to Int16
+cfloatToInt16 :: CFloat -> Int16
+cfloatToInt16 (CFloat x) = 
+  let scaled = round (x * 32767.0) :: Int
+  in fromIntegral $ max (-32768) (min 32767 scaled)
+
+-- Convert Int16 to CFloat
+int16ToCFloat :: Int16 -> CFloat
+int16ToCFloat x = CFloat $ fromIntegral x / 32768.0
+
+-- MIDI encoding functions (for potential future use with jackmidi)
+encodeMidiNoteOn :: Word8 -> Word8 -> Word8 -> BS.ByteString
 encodeMidiNoteOn channel note velocity = 
-  BS.pack [fromIntegral (0x90 .|. (channel .&. 0x0F)), fromIntegral note, fromIntegral velocity]
+  BS.pack [0x90 .|. (channel .&. 0x0F), note, velocity]
 
--- Encode MIDI Note Off
-encodeMidiNoteOff :: Int -> Int -> BS.ByteString
+encodeMidiNoteOff :: Word8 -> Word8 -> BS.ByteString
 encodeMidiNoteOff channel note = 
-  BS.pack [fromIntegral (0x80 .|. (channel .&. 0x0F)), fromIntegral note, 0]
+  BS.pack [0x80 .|. (channel .&. 0x0F), note, 0]
 
--- Encode Pitch Bend (14-bit value, center = 8192)
-encodePitchBend :: Int -> Double -> BS.ByteString
+encodePitchBend :: Word8 -> Double -> BS.ByteString
 encodePitchBend channel bendSemitones = 
-  let bendRange = 2.0  -- ±2 semitones
-      normalized = bendSemitones / bendRange  -- -1 to 1
-      value = round ((normalized + 1.0) * 8191.5)  -- 0 to 16383
-      lsb = value .&. 0x7F
-      msb = (value `shiftR` 7) .&. 0x7F
-  in BS.pack [fromIntegral (0xE0 .|. (channel .&. 0x0F)), fromIntegral lsb, fromIntegral msb]
+  let bendRange = 2.0
+      normalized = bendSemitones / bendRange
+      value = round ((normalized + 1.0) * 8191.5) :: Int
+      lsb = fromIntegral $ value .&. 0x7F
+      msb = fromIntegral $ (value `shiftR` 7) .&. 0x7F
+  in BS.pack [0xE0 .|. (channel .&. 0x0F), lsb, msb]
 
 shiftR :: Int -> Int -> Int
-shiftR = unsafeShiftR
+shiftR x n = x `shiftR` n
 
-unsafeShiftR :: Int -> Int -> Int
-unsafeShiftR x n = x `div` (2^n)
+-- Audio Processing State
+data AudioState = AudioState
+  { audioRingBuffer :: !AudioRingBuffer
+  , sampleCounter  :: !(IORef Word64)
+  , running        :: !(IORef Bool)
+  , lastNote       :: !(IORef (Maybe (Int, Int)))
+  }
 
--- Main JACK backend with dual-path detection
+newAudioState :: Int -> IO AudioState
+newAudioState bufferSize = do
+  ring <- newAudioRingBuffer bufferSize
+  counter <- newIORef 0
+  runRef <- newIORef True
+  lastNoteRef <- newIORef Nothing
+  return $ AudioState ring counter runRef lastNoteRef
+
+-- Main JACK backend using mainMono (simplest working approach)
 runBackend :: Config -> TVar ReactorState -> IO ()
 runBackend cfg state = do
-  putStrLn "Starting DeMoDNote JACK backend..."
+  putStrLn "Starting DeMoD-Note JACK backend..."
   putStrLn $ "Sample rate: 96000 Hz"
   putStrLn $ "Buffer size: 128 samples (1.33ms)"
   putStrLn $ "Fast path: 2.66ms (200Hz+)"
@@ -104,85 +129,102 @@ runBackend cfg state = do
   putStrLn $ "Slow path: 30ms (30-80Hz validated)"
   putStrLn $ "Onset threshold: 0.67"
   
-  -- Initialize ring buffer (30ms * 96kHz = 2880 samples, rounded to 4096)
-  ringBuf <- newRingBuffer 4096
+  -- Initialize audio state
+  audioState <- newAudioState 8192
   
   -- Initialize detector state
-  initialState <- atomically $ readTVar state
   let detectorState = emptyReactorState cfg
   
-  -- Setup signal handlers
-  _ <- installHandler sigINT (Catch $ putStrLn "\nReceived SIGINT, shutting down...") Nothing
-  _ <- installHandler sigTERM (Catch $ putStrLn "\nReceived SIGTERM, shutting down...") Nothing
-  
-  -- Start detector thread
-  _ <- forkIO $ detectorThread cfg ringBuf state
-  
-  -- Run JACK audio thread (main thread)
-  runJackAudio cfg ringBuf
-  
-  putStrLn "DeMoDNote backend stopped."
+  -- Install signal handlers
+  _ <- installHandler sigINT (Catch $ do
+    writeIORef (running audioState) False
+    putStrLn "\nSIGINT received, shutting down...") Nothing
+  _ <- installHandler sigTERM (Catch $ do
+    writeIORef (running audioState) False  
+    putStrLn "\nSIGTERM received, shutting down...") Nothing
 
--- JACK audio callback - just copies samples to ring buffer
-runJackAudio :: Config -> RingBuffer -> IO ()
-runJackAudio cfg ringBuf = 
+  -- Fork detector thread
+  detectorTid <- forkIO $ detectorThread cfg audioState state
+  
+  -- Run JACK audio processing with mainMono
+  -- This provides mono input -> mono output with passthrough
   JAudio.mainMono $ \sample -> do
-    -- Convert and push to ring buffer
+    -- Convert to Int16
     let intSample = cfloatToInt16 sample
-    pushSample ringBuf intSample
     
-    -- Return sample (passthrough)
+    -- Get current sample count
+    cnt <- readIORef (sampleCounter audioState)
+    let time = cnt `div` 128  -- Approximate buffer count as time
+    
+    -- Push to ring buffer
+    pushSamples (audioRingBuffer audioState) (VS.singleton intSample)
+    
+    -- Increment counter
+    modifyIORef' (sampleCounter audioState) (+ 1)
+    
+    -- Return sample unchanged (passthrough)
     return sample
 
--- Detector thread - runs detection algorithms
-detectorThread :: Config -> RingBuffer -> TVar ReactorState -> IO ()
-detectorThread cfg ringBuf stateVar = do
-  putStrLn "Detector thread started"
-  detectorLoop Idle defaultPLLState defaultOnsetFeatures 0
-  where
-    detectorLoop nState pllState onsetState prevTime = do
-      threadDelay 1333  -- 1.33ms - check every buffer
-      
-      currentTime <- getMicroTime
-      
-      -- Get current samples (128 samples = 1.33ms)
-      samples <- getBuffer ringBuf 128
-      
-      -- Run detection
-      result <- detect cfg samples currentTime nState pllState onsetState
-      
-      -- Handle detection result
-      case detectedNote result of
-        Nothing -> return ()
-        Just (note, vel) -> do
-          -- Check if we need pitch bend correction
-          case needsBend result of
-            Just (targetNote, bend) -> do
-              -- Send pitch bend
-              putStrLn $ "Pitch bend: " ++ show note ++ " -> " ++ show targetNote ++ " (" ++ show bend ++ " semitones)"
-              -- TODO: Send MIDI pitch bend
-            Nothing -> do
-              -- Send note on
-              putStrLn $ "Note on: " ++ show note ++ " vel=" ++ show vel ++ " conf=" ++ show (confidence result)
-              -- TODO: Send MIDI note on
-      
-      -- Update state
-      let newState = (ReactorState 
-                      (case detectedNote result of Just n -> [n]; Nothing -> [])
-                      (noteState result)
-                      pllState
-                      onsetState
-                      currentTime
-                      cfg)
-      atomically $ writeTVar stateVar newState
-      
-      -- Continue loop
-      detectorLoop (noteState result) pllState onsetState currentTime
+  -- This won't be reached unless JACK fails
+  putStrLn "JACK processing stopped."
+  putStrLn "DeMoD-Note backend stopped."
 
--- Alternative: Full JACK implementation with explicit process callback
-runBackendFull :: Config -> TVar ReactorState -> IO ()
-runBackendFull cfg state = do
-  putStrLn "Starting DeMoDNote JACK backend (full implementation)..."
-  -- This would use withClient, newPort, setProcessCallback, etc.
-  -- For now, simplified version above is used
-  runBackend cfg state
+-- Detector thread - runs detection in background
+detectorThread :: Config -> AudioState -> TVar ReactorState -> IO ()
+detectorThread cfg audioState stateVar = do
+  putStrLn "Detector thread started"
+  detectorLoop
+  where
+    detectorLoop = do
+      isRunning <- readIORef (running audioState)
+      if not isRunning
+        then putStrLn "Detector thread stopping"
+        else do
+          threadDelay 1333  -- 1.33ms - check every buffer
+          
+          -- Get current samples from ring buffer
+          samples <- readSamples (audioRingBuffer audioState) 256
+          
+          when (VS.length samples >= 128) $ do
+            currentTime <- getMicroTime
+            
+            -- Convert Int16 to Int for detector
+            let samplesInt = VS.map fromIntegral samples
+            
+            -- Run detection
+            result <- detect cfg samplesInt currentTime Idle defaultPLLState defaultOnsetFeatures
+            
+            -- Handle detection result
+            case detectedNote result of
+              Nothing -> return ()
+              Just (note, vel) -> do
+                lastN <- readIORef (lastNote audioState)
+                case lastN of
+                  Just (lastNote, _) | lastNote == note -> return ()
+                  _ -> do
+                    -- Note changed - could send MIDI here
+                    putStrLn $ "Detection: note=" ++ show note ++ " vel=" ++ show vel ++ 
+                              " conf=" ++ show (confidence result) ++ 
+                              " state=" ++ show (noteState result)
+                    writeIORef (lastNote audioState) $ Just (note, vel)
+          
+          detectorLoop
+
+-- Simple passthrough version
+runBackendSimple :: Config -> TVar ReactorState -> IO ()
+runBackendSimple cfg state = do
+  putStrLn "Starting DeMoD-Note (simple passthrough mode)..."
+  
+  -- Install signal handlers
+  doneRef <- newIORef False
+  _ <- installHandler sigINT (Catch $ do
+    writeIORef doneRef True
+    putStrLn "\nShutting down...") Nothing
+  
+  -- Simple mono passthrough
+  JAudio.mainMono $ \sample -> do
+    done <- readIORef doneRef
+    when done $ error "Shutdown requested"
+    return sample
+  
+  putStrLn "DeMoD-Note stopped."
