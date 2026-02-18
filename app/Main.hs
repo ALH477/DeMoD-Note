@@ -21,6 +21,7 @@ import Control.Concurrent (forkIO, threadDelay, readChan)
 import System.Exit
 import System.IO (stdout)
 import qualified Data.Text as T
+import Control.Exception (catch, SomeException)
 
 data Command
   = Run { cmdConfig :: Maybe FilePath, cmdPreset :: Maybe String, cmdInteractive :: Bool }
@@ -134,12 +135,27 @@ runNormal mCfg mPreset = do
   handleScribe <- mkHandleScribe ColorIfTerminal stdout (permitItem InfoS) V2
   logEnv' <- registerScribe "stdout" handleScribe defaultScribeSettings le
 
-  oscAsync <- async $ startOSC (oscPort cfg') state
-  monitorAsync <- async $ startMonitor (monitorPort cfg') state
-  backendAsync <- async $ runBackend cfg' state
+  let handleAsyncError e = do
+        putStrLn $ "Async error: " ++ show e
+        putStrLn "Attempting to clean up..."
+  
+  oscAsync <- async $ catch (startOSC (oscPort cfg') state) $ \e -> do
+        handleAsyncError (e :: SomeException)
+        return ()
+  monitorAsync <- async $ catch (startMonitor (monitorPort cfg') state) $ \e -> do
+        handleAsyncError (e :: SomeException)
+        return ()
+  backendAsync <- async $ catch (runBackend cfg' state) $ \e -> do
+        handleAsyncError (e :: SomeException)
+        return ()
 
   putStrLn "DeMoDNote started. Press Ctrl+C to stop."
-  waitAnyCatchCancel [oscAsync, monitorAsync, backendAsync]
+  result <- waitAnyCatchCancel [oscAsync, monitorAsync, backendAsync]
+  case result of
+    (_, Left e) -> do
+        putStrLn $ "Error in main loop: " ++ show e
+    _ -> return ()
+  
   closeScribes logEnv'
   exitSuccess
 

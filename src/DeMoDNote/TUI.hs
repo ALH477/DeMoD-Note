@@ -17,7 +17,7 @@ import Data.Maybe (fromMaybe)
 import DeMoDNote.Types
 import DeMoDNote.Config
 import DeMoDNote.Preset (getPresetByName, Preset)
-import DeMoDNote.Backend (DetectionEvent(..))
+import DeMoDNote.Backend (DetectionEvent(..), JackStatus(..))
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Events
@@ -52,6 +52,7 @@ data TUIState = TUIState
     , tuiTuningNote   :: Maybe Int
     , tuiTuningCents  :: Double
     , tuiTuningInTune :: Bool
+    , tuiJackStatus   :: JackStatus
     }
 
 -- Available scales / arpeggios (cycle through with s/a)
@@ -89,6 +90,7 @@ initialTUIState cfg = TUIState
     , tuiTuningNote   = Nothing
     , tuiTuningCents  = 0.0
     , tuiTuningInTune = False
+    , tuiJackStatus   = JackConnected
     }
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -193,13 +195,24 @@ drawUI state = [ui]
 topRow :: TUIState -> Widget ()
 topRow state =
     hBox
-        [ drawBPMPanel state
+        [ drawJackStatusPanel state
+        , vBorder
+        , drawBPMPanel state
         , vBorder
         , drawNotePanel state
         , vBorder
         , drawConfidencePanel state
         , vBorder
         , drawLatencyPanel state
+        ]
+
+drawJackStatusPanel :: TUIState -> Widget ()
+drawJackStatusPanel state =
+    padAll 1 $
+    hLimit 20 $
+    vBox
+        [ withAttr labelAttr (str "JACK")
+        , withAttr (jackStatusAttr (tuiJackStatus state)) (str (jackStatusText (tuiJackStatus state)))
         ]
 
 drawBPMPanel :: TUIState -> Widget ()
@@ -337,6 +350,25 @@ tuningAttr inTune
 tuningGreenAttr, tuningRedAttr :: AttrName
 tuningGreenAttr = attrName "tuningGreen"
 tuningRedAttr = attrName "tuningRed"
+
+jackStatusAttr :: JackStatus -> AttrName
+jackStatusAttr status = case status of
+    JackConnected -> jackGreenAttr
+    JackDisconnected -> jackRedAttr
+    JackReconnecting -> jackYellowAttr
+    JackError _ -> jackRedAttr
+
+jackGreenAttr, jackRedAttr, jackYellowAttr :: AttrName
+jackGreenAttr = attrName "jackGreen"
+jackRedAttr = attrName "jackRed"
+jackYellowAttr = attrName "jackYellow"
+
+jackStatusText :: JackStatus -> String
+jackStatusText status = case status of
+    JackConnected -> "Connected"
+    JackDisconnected -> "Disconnected"
+    JackReconnecting -> "Reconnecting..."
+    JackError msg -> "Error: " ++ msg
 
 -- ── Middle row: Scale | Arpeggio ─────────────────────────────────────────────
 
@@ -543,6 +575,9 @@ theMap = attrMap defAttr
     , (progressIncompleteAttr, bg black)
     , (tuningGreenAttr, fg brightGreen)
     , (tuningRedAttr, fg red)
+    , (jackGreenAttr, fg brightGreen)
+    , (jackRedAttr, fg red)
+    , (jackYellowAttr, fg yellow)
     ]
 
 -- ─────────────────────────────────────────────────────────────────────────────

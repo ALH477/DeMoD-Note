@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module DeMoDNote.Backend (
     module DeMoDNote.Types,
@@ -6,7 +7,10 @@ module DeMoDNote.Backend (
     module DeMoDNote.Detector,
     DetectionEvent(..),
     runBackend,
-    runBackendSimple
+    runBackendSimple,
+    JackState(..),
+    newJackState,
+    JackStatus(..)
 ) where
 
 import DeMoDNote.Types
@@ -14,6 +18,7 @@ import DeMoDNote.Config
 import DeMoDNote.Detector
 
 import Sound.JACK
+import Sound.JACK.Exception
 import qualified Sound.JACK.Audio as JAudio
 import qualified Data.Vector.Storable as VS
 import Control.Monad
@@ -25,6 +30,79 @@ import Foreign.C.Types (CFloat(..))
 import Data.Int (Int16)
 import System.CPUTime (getCPUTime)
 import System.Posix.Signals (installHandler, sigINT, sigTERM, Handler(..))
+import Control.Exception (try, throwIO, SomeException, catch, Exception(..))
+
+-- Jack connection status
+data JackStatus 
+    = JackConnected
+    | JackDisconnected
+    | JackReconnecting
+    | JackError String
+    deriving (Show, Eq)
+
+-- Jack state for reconnection
+data JackState = JackState
+    { jackStatus :: IORef JackStatus
+    , reconnectAttempts :: IORef Int
+    , maxReconnectAttempts :: Int
+    , shouldReconnect :: IORef Bool
+    }
+
+newJackState :: Int -> IO JackState
+newJackState maxAttempts = do
+    status <- newIORef JackConnected
+    attempts <- newIORef 0
+    recon <- newIORef True
+    return $ JackState status attempts maxAttempts recon
+
+-- JACK exception type
+data JackException = JackConnectionFailed String
+                   | JackDisconnectedErr String
+                   | JackReconnectFailed Int
+    deriving (Show)
+
+instance Exception JackException
+
+-- Attempt to reconnect to JACK
+attemptReconnect :: JackState -> IO Bool
+attemptReconnect state = do
+    attempts <- readIORef (reconnectAttempts state)
+    
+    if attempts >= maxReconnectAttempts state
+    then do
+        writeIORef (jackStatus state) $ JackError "Max reconnection attempts reached"
+        writeIORef (shouldReconnect state) False
+        putStrLn $ "JACK reconnection failed after " ++ show attempts ++ " attempts"
+        return False
+    else do
+        writeIORef (jackStatus state) JackReconnecting
+        putStrLn $ "JACK disconnected. Reconnecting (attempt " ++ show (attempts + 1) ++ "/" ++ show (maxReconnectAttempts state) ++ ")..."
+        threadDelay 2000000  -- 2 second delay
+        putStrLn "Reconnection requires JACK server restart. Please restart DeMoD-Note."
+        writeIORef (shouldReconnect state) False
+        return False
+
+-- Handle JACK error with reconnection
+handleJackError :: JackState -> SomeException -> IO ()
+handleJackError state e = do
+    let errMsg = show e
+    putStrLn $ "JACK error: " ++ errMsg
+    writeIORef (jackStatus state) $ JackError errMsg
+    
+    shouldRecon <- readIORef (shouldReconnect state)
+    when shouldRecon $ do
+        _ <- attemptReconnect state
+        return ()
+
+-- Wrap action with error handling
+withJackErrorHandling :: JackState -> IO a -> IO a
+withJackErrorHandling state action = do
+    result <- try action
+    case result of
+        Right val -> return val
+        Left (e :: SomeException) -> do
+            handleJackError state e
+            throwIO e
 
 -- Detection event for TUI updates
 data DetectionEvent = DetectionEvent
@@ -36,6 +114,7 @@ data DetectionEvent = DetectionEvent
     , deTuningNote :: Maybe Int
     , deTuningCents :: Double
     , deTuningInTune :: Bool
+    , deJackStatus :: JackStatus
     }
 
 getMicroTime :: IO Word64
@@ -107,30 +186,45 @@ runBackend cfg state = do
   putStrLn $ "Detection paths: Fast (2.66ms), Medium (12ms), Slow (30ms)"
   
   audioState <- newAudioState 8192
+  jackState <- newJackState 5  -- Max 5 reconnection attempts
   
   _ <- installHandler sigINT (Catch $ do
     writeIORef (running audioState) False
+    writeIORef (shouldReconnect jackState) False
     putStrLn "\nSIGINT received, shutting down...") Nothing
   _ <- installHandler sigTERM (Catch $ do
     writeIORef (running audioState) False  
+    writeIORef (shouldReconnect jackState) False
     putStrLn "\nSIGTERM received, shutting down...") Nothing
 
   -- Fork detector thread
   _ <- forkIO $ detectorThread cfg audioState state
   
-  -- Run JACK with mainMono (simple mono input -> mono output)
-  JAudio.mainMono $ \sample -> do
-    -- Convert to Int16
-    let intSample = cfloatToInt16 sample
-    
-    -- Push to ring buffer
-    pushSamples (audioRingBuffer audioState) (VS.singleton intSample)
-    
-    -- Update counter
-    modifyIORef' (sampleCounter audioState) (+ 1)
-    
-    -- Return sample unchanged (passthrough)
-    return sample
+  -- Run JACK with mainMono and error handling
+  let jackLoop = do
+        result <- try $ JAudio.mainMono $ \sample -> do
+            -- Convert to Int16
+            let intSample = cfloatToInt16 sample
+            
+            -- Push to ring buffer
+            pushSamples (audioRingBuffer audioState) (VS.singleton intSample)
+            
+            -- Update counter
+            modifyIORef' (sampleCounter audioState) (+ 1)
+            
+            -- Return sample unchanged (passthrough)
+            return sample
+        case result of
+            Right _ -> do
+                status <- readIORef (jackStatus jackState)
+                when (status == JackConnected) $ do
+                    putStrLn "JACK thread exiting normally"
+            Left (e :: SomeException) -> do
+                handleJackError jackState e
+                shouldRecon <- readIORef (shouldReconnect jackState)
+                when shouldRecon jackLoop
+  
+  jackLoop
   
   putStrLn "DeMoD-Note stopped."
 
