@@ -80,7 +80,7 @@ initialTUIState cfg = TUIState
     , tuiWaveform      = replicate 64 0.0
     , tuiScaleName     = "C Major"
     , tuiScaleIndex    = 0
-    , tuiArpeggioName  :: "None"
+    , tuiArpeggioName  = "None"
     , tuiArpeggioIndex = 0
     , tuiRunning       = True
     , tuiStatusMessage = "Ready"
@@ -157,27 +157,14 @@ confidenceAttrName c
 -- App
 -- ─────────────────────────────────────────────────────────────────────────────
 
-tuiApp :: Maybe (BChan TUIEvent) -> App TUIState TUIEvent ()
-tuiApp mChan = App
+tuiApp :: App TUIState TUIEvent ()
+tuiApp = App
     { appDraw         = drawUI
     , appChooseCursor = neverShowCursor
     , appHandleEvent  = handleEvent
-    , appStartEvent   = appStart mChan
+    , appStartEvent   = return ()
     , appAttrMap      = const theMap
-    , appBChan        = mChan
     }
-
--- Start event: fork thread to read backend channel if provided
-appStart :: Maybe (BChan TUIEvent) -> EventM () TUIState ()
-appStart Nothing  = return ()
-appStart (Just bc) = do
-    -- We assume the backend channel is passed via Config or global state for this example
-    -- In a real app, you'd pass the backend Chan into TUIState or here.
-    -- For this fix, we assume the BChan is fed by an external thread not managed here,
-    -- OR we simply acknowledge the BChan is ready.
-    -- To make it functional based on runTUIWithChannel logic:
-    -- The external thread should write to 'bc'.
-    return ()
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Layout
@@ -578,7 +565,7 @@ runTUIWithChannel cfg mChan = do
                 writeBChan bc (TUIDetection ev)
             return (Just bc)
 
-    let app = tuiApp mBChan
+    let app = tuiApp
         initialState = initialTUIState cfg
     
     _ <- defaultMain app initialState

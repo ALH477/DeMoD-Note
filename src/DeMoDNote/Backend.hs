@@ -231,7 +231,6 @@ runBackendSimple cfg state = do
   
   JAudio.mainMono $ \sample -> do
     done <- readIORef doneRef
-    when done $ error "Shutdown requested"
     return sample
   
   putStrLn "DeMoD-Note stopped."

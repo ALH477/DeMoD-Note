@@ -6,6 +6,13 @@ module DeMoDNote.Config where
 import GHC.Generics
 import Toml
 import qualified Toml.Codec.Combinator as Toml
+import Control.Exception (Exception, throwIO)
+
+data ConfigException = ConfigParseError String
+                     | ConfigValidationError String
+    deriving (Show)
+
+instance Exception ConfigException
 
 data BackendType = Jack | PortAudio deriving (Show, Eq, Generic, Enum, Bounded)
 
@@ -157,5 +164,5 @@ loadConfig Nothing = pure defaultConfig
 loadConfig (Just p) = do
   result <- Toml.decodeFileExact configCodec p
   case result of
-    Left errs -> error $ "Config parse error: " ++ show errs
+    Left errs -> throwIO $ ConfigParseError (show errs)
     Right cfg -> pure cfg

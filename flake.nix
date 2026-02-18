@@ -123,6 +123,9 @@
             hp.cabal-install hp.haskell-language-server hp.ghcid
             jack2 fluidsynth qjackctl fftw pkg-config
             python3 python3Packages.pip
+            hp.hspec
+            hp.QuickCheck
+            hp.quickcheck-instances
           ];
           shellHook = ''
             export FLUID_SOUNDFONT="${pkgs.soundfont-fluid}/share/soundfonts/FluidR3_GM.sf2"

@@ -25,7 +25,7 @@ import GHC.Generics
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.List (sort)
-import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory, removeFile)
 import System.FilePath ((</>))
 import DeMoDNote.Config
 import DeMoDNote.Scale (Scale, ScaleType(..), NoteName(..), makeScale)
@@ -289,9 +289,6 @@ deletePreset name = do
     if exists
     then removeFile path
     else putStrLn $ "Preset not found: " ++ name
-
-removeFile :: FilePath -> IO ()
-removeFile = error "System.Directory.removeFile not available"
 
 -- Convert string to scale type
 parseScaleType :: String -> ScaleType
