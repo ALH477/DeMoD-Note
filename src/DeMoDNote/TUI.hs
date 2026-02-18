@@ -8,6 +8,7 @@ import Brick.Widgets.ProgressBar hiding (progressCompleteAttr, progressIncomplet
 import Graphics.Vty
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM
+import Control.Monad.IO.Class
 import Data.Time.Clock
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
