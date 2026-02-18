@@ -2,3 +2,7 @@ dist-newstyle/
 result/
 *.o
 *.hi
+__pycache__/
+*.pyc
+.eggs/
+*.egg-info/
