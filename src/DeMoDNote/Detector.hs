@@ -191,6 +191,43 @@ calcPitchBend currentNote targetFreq =
       semitones = 12 * logBase 2 ratio
   in max (-2.0) (min 2.0 semitones)  -- Clamp to ±2 semitones
 
+-- Tuning functions
+midiToFreq :: Int -> Double
+midiToFreq n = 440.0 * (2 ** ((fromIntegral n - 69) / 12))
+
+freqToCents :: Double -> Int -> Double
+freqToCents freq midiNote = 
+    let targetFreq = midiToFreq midiNote
+    in 1200.0 * logBase 2 (freq / targetFreq)
+
+nearestNote :: Double -> (Int, Double)
+nearestNote freq
+    | freq <= 0 = (0, 0.0)
+    | otherwise = 
+        let midiNote = freqToMidi freq
+            centsBelow = freqToCents freq (midiNote - 1)
+            centsAbove = freqToCents freq (midiNote + 1)
+            centsCurrent = freqToCents freq midiNote
+            (closestNote, closestCents) = minimumBy compare 
+                [(midiNote, centsCurrent), (midiNote - 1, centsBelow), (midiNote + 1, centsAbove)]
+        in (closestNote, closestCents)
+
+minimumBy :: (a -> a -> Ordering) -> [a] -> a
+minimumBy cmp = foldl1 (\x y -> if cmp x y == GT then y else x)
+
+isInTune :: Double -> Bool
+isInTune cents = abs cents <= 5.0
+
+isClose :: Double -> Bool
+isClose cents = abs cents <= 15.0
+
+midiToNoteName :: Int -> String
+midiToNoteName n = 
+    let noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        note = noteNames !! (n `mod` 12)
+        octave = (n `div` 12) - 1
+    in note ++ show octave
+
 -- Main detection function with state machine
 detect :: Config -> VS.Vector Int -> TimeStamp -> NoteState -> PLLState -> OnsetFeatures -> IO DetectionResult
 detect cfg samplesInt16 currentTime prevState prevPLL prevOnset = do

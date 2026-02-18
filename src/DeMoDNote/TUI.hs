@@ -26,12 +26,12 @@ import Control.Concurrent (Chan, forkIO, threadDelay, readChan)
 data TUIState = TUIState
     { tuiConfig        :: Config
     , tuiBPM           :: Double
-    , tuiTapTimes      :: [UTCTime]   -- ring buffer of last 8 tap timestamps
+    , tuiTapTimes      :: [UTCTime]
     , tuiLastNote      :: Maybe (Int, Int)
-    , tuiNoteHistory   :: [(Int, Int)] -- last 8 (note, vel) pairs, newest first
+    , tuiNoteHistory   :: [(Int, Int)]
     , tuiConfidence    :: Double
     , tuiLatency       :: Double
-    , tuiWaveform      :: [Double]    -- [-1.0 .. 1.0], 64 samples
+    , tuiWaveform      :: [Double]
     , tuiScaleName     :: String
     , tuiScaleIndex    :: Int
     , tuiArpeggioName  :: String
@@ -39,6 +39,10 @@ data TUIState = TUIState
     , tuiRunning       :: Bool
     , tuiStatusMessage :: String
     , tuiShowHelp      :: Bool
+    , tuiTuningMode    :: Bool
+    , tuiTuningNote   :: Maybe Int
+    , tuiTuningCents  :: Double
+    , tuiTuningInTune :: Bool
     }
 
 -- Available scales / arpeggios (cycle through with s/a)
@@ -72,6 +76,10 @@ initialTUIState cfg = TUIState
     , tuiRunning       = True
     , tuiStatusMessage = "Ready"
     , tuiShowHelp      = False
+    , tuiTuningMode    = False
+    , tuiTuningNote   = Nothing
+    , tuiTuningCents  = 0.0
+    , tuiTuningInTune = False
     }
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -162,7 +170,7 @@ drawUI state = [ui]
         vBox
             [ topRow state
             , hBorder
-            , drawWaveformPanel state
+            , if tuiTuningMode state then drawTuningPanel state else drawWaveformPanel state
             , hBorder
             , midRow state
             , hBorder
@@ -264,6 +272,63 @@ drawWaveformPanel state =
   where
     runningStr = if tuiRunning state then "▶ running" else "⏸ paused  [p] to resume"
 
+-- ── Tuning Panel ───────────────────────────────────────────────────────────────
+
+drawTuningPanel :: TUIState -> Widget ()
+drawTuningPanel state =
+    padLeftRight 1 $
+    vBox
+        [ withAttr labelAttr (str "Chromatic Tuner")
+        , str ""
+        , noteWidget
+        , str ""
+        , centsWidget
+        , str ""
+        , indicatorWidget
+        ]
+  where
+    noteWidget = case tuiTuningNote state of
+        Nothing -> withAttr dimAttr (str "Play a note...")
+        Just n -> withAttr noteAttr (str ("Note: " ++ midiToName n))
+    
+    cents = tuiTuningCents state
+    centsWidget = 
+        let centsStr = show (round cents :: Int)
+            centsDisplay = if cents >= 0 then "+" ++ centsStr else centsStr
+            bar = drawCentsBar cents
+        in vBox
+            [ withAttr (tuningAttr (tuiTuningInTune state)) (str bar)
+            , withAttr valueAttr (str (centsDisplay ++ " cents"))
+            ]
+    
+    indicatorWidget = 
+        let status = if tuiTuningInTune state 
+                     then "● IN TUNE" 
+                     else if abs cents <= 15.0 
+                          then "◐ CLOSE" 
+                          else "○ OUT"
+            attr = tuningAttr (tuiTuningInTune state)
+        in withAttr attr (str status)
+
+drawCentsBar :: Double -> String
+drawCentsBar cents =
+    let totalWidth = 25
+        zeroPos = totalWidth `div` 2
+        barPos = zeroPos + round (cents / 5.0)  -- 5 cents per character
+        barPos' = max 0 (min (totalWidth - 1) barPos)
+        left = replicate barPos' '░'
+        right = replicate (totalWidth - 1 - barPos') '░'
+    in left ++ "┃" ++ right
+
+tuningAttr :: Bool -> AttrName
+tuningAttr inTune
+    | inTune = tuningGreenAttr
+    | otherwise = tuningRedAttr
+
+tuningGreenAttr, tuningRedAttr :: AttrName
+tuningGreenAttr = attrName "tuningGreen"
+tuningRedAttr = attrName "tuningRed"
+
 -- ── Middle row: Scale | Arpeggio ─────────────────────────────────────────────
 
 midRow :: TUIState -> Widget ()
@@ -361,6 +426,13 @@ handleEvent (VtyEvent e) = case e of
             , tuiStatusMessage = "Tap tempo reset"
             }
 
+    -- Toggle tuning mode
+    EvKey (KChar 't') [] -> do
+        state <- get
+        let mode' = not (tuiTuningMode state)
+            msg  = if mode' then "Tuning mode ON" else "Tuning mode OFF"
+        put state { tuiTuningMode = mode', tuiStatusMessage = msg }
+
     _ -> return ()
 
 handleEvent (AppEvent msg) = do
@@ -411,6 +483,7 @@ noteAttr, velAttr, waveAttr, helpAttr    :: AttrName
 highConfAttr, midConfAttr, lowConfAttr   :: AttrName
 progressCompleteAttr, progressIncompleteAttr :: AttrName
 
+
 titleAttr            = attrName "title"
 labelAttr            = attrName "label"
 valueAttr            = attrName "value"
@@ -424,7 +497,6 @@ midConfAttr          = attrName "midConf"
 lowConfAttr          = attrName "lowConf"
 progressCompleteAttr   = attrName "progressComplete"
 progressIncompleteAttr = attrName "progressIncomplete"
-
 theMap :: AttrMap
 theMap = attrMap defAttr
     [ (titleAttr,    withStyle (fg cyan) bold)
@@ -440,6 +512,8 @@ theMap = attrMap defAttr
     , (lowConfAttr,  fg red)
     , (progressCompleteAttr,   bg brightGreen)
     , (progressIncompleteAttr, bg black)
+    , (tuningGreenAttr, fg brightGreen)
+    , (tuningRedAttr, fg red)
     ]
 
 -- ─────────────────────────────────────────────────────────────────────────────

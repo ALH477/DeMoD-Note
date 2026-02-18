@@ -33,6 +33,9 @@ data DetectionEvent = DetectionEvent
     , deLatency    :: Double
     , deWaveform   :: [Double]
     , deState      :: NoteState
+    , deTuningNote :: Maybe Int
+    , deTuningCents :: Double
+    , deTuningInTune :: Bool
     }
 
 getMicroTime :: IO Word64
@@ -160,13 +163,22 @@ detectorThread cfg audioState stateVar = do
             -- Run detection
             result <- detect cfg samplesInt currentTime Idle defaultPLLState defaultOnsetFeatures
             
+            -- Calculate tuning
+            let (tuningNote, tuningCents) = case detectedNote result of
+                    Nothing -> (Nothing, 0.0)
+                    Just (note, _) -> 
+                        let freq = midiToFreq note
+                            (nearest, cents) = nearestNote freq
+                        in (Just nearest, cents)
+                tuningInTune = isInTune tuningCents
+            
             -- Update state refs
             writeIORef (lastConfidence audioState) (confidence result)
             writeIORef (lastLatency audioState) 2.66
             writeIORef (lastWaveform audioState) waveform
             
             -- Handle note on/off
-            handleNoteChange audioState (detectedNote result) (noteState result)
+            handleNoteChange audioState (detectedNote result) (noteState result) tuningNote tuningCents tuningInTune
             
             -- Update reactor state
             let newReactorState = ReactorState
@@ -185,8 +197,8 @@ detectorThread cfg audioState stateVar = do
             
           detectorLoop
 
-handleNoteChange :: AudioState -> Maybe (Int, Int) -> NoteState -> IO ()
-handleNoteChange audioState Nothing _ = do
+handleNoteChange :: AudioState -> Maybe (Int, Int) -> NoteState -> Maybe Int -> Double -> Bool -> IO ()
+handleNoteChange audioState Nothing _ _ _ _ = do
   -- No note detected - send note off if we have a current note
   curr <- readIORef (currentNote audioState)
   case curr of
@@ -195,15 +207,17 @@ handleNoteChange audioState Nothing _ = do
       writeIORef (currentNote audioState) Nothing
     Nothing -> return ()
 
-handleNoteChange audioState (Just (note, vel)) noteState = do
+handleNoteChange audioState (Just (note, vel)) noteState tuningNote tuningCents tuningInTune = do
   curr <- readIORef (currentNote audioState)
   case curr of
     Just (lastNote, _) | lastNote == note -> 
       return ()  -- Same note, no change
     _ -> do
       -- Note on
-      putStrLn $ "Note On: " ++ show note ++ " vel=" ++ show vel ++ 
-                 " (state: " ++ show noteState ++ ")"
+      let tuningInfo = case tuningNote of
+            Just t -> " [tuning: " ++ midiToNoteName t ++ " " ++ show (round tuningCents) ++ " cents" ++ if tuningInTune then " ✓]" else "]"
+            Nothing -> ""
+      putStrLn $ "Note On: " ++ show note ++ " vel=" ++ show vel ++ tuningInfo
       writeIORef (currentNote audioState) $ Just (note, vel)
 
 -- Simple passthrough mode

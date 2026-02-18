@@ -44,6 +44,24 @@ data DetectionResult = DetectionResult
   , needsBend    :: Maybe (MIDINote, Double)  -- (targetNote, bendAmountSemitones)
   } deriving (Show)
 
+-- Tuning state for chromatic tuner
+data TuningState = TuningState
+  { tuningNote       :: !(Maybe MIDINote)
+  , tuningCents     :: {-# UNPACK #-} !Double
+  , tuningFrequency  :: {-# UNPACK #-} !Double
+  , tuningConfidence :: {-# UNPACK #-} !Double
+  , tuningInTune    :: !Bool
+  } deriving (Show)
+
+defaultTuningState :: TuningState
+defaultTuningState = TuningState
+  { tuningNote = Nothing
+  , tuningCents = 0.0
+  , tuningFrequency = 0.0
+  , tuningConfidence = 0.0
+  , tuningInTune = False
+  }
+
 data ReactorState = ReactorState
   { currentNotes    :: [(MIDINote, Velocity)]
   , noteStateMach   :: !NoteState
