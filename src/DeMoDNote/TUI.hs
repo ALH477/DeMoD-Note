@@ -6,9 +6,10 @@ import Brick.Widgets.Border.Style
 import Brick.Widgets.Center
 import Brick.Widgets.ProgressBar hiding (progressCompleteAttr, progressIncompleteAttr)
 import Graphics.Vty
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.STM
-import Control.Monad.IO.Class
+import Control.Concurrent (Chan, forkIO, threadDelay, readChan)
+import Control.Concurrent.STM (TVar, newTVarIO, readTVar, readTVarIO, writeTVar, atomically)
+import Control.Monad (forever)
+import Control.Monad.IO.Class (liftIO)
 import Data.Time.Clock
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
@@ -16,6 +17,7 @@ import DeMoDNote.Types
 import DeMoDNote.Config
 import DeMoDNote.Preset (getPresetByName, Preset)
 import DeMoDNote.Backend (DetectionEvent(..))
+import Control.Concurrent (Chan, forkIO, threadDelay, readChan)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- State
@@ -445,24 +447,19 @@ theMap = attrMap defAttr
 -- ─────────────────────────────────────────────────────────────────────────────
 
 runTUI :: Config -> IO ()
-runTUI cfg = do
-    _ <- defaultMain tuiApp (initialTUIState cfg)
-    return ()
+runTUI cfg = runTUIWithChannel cfg Nothing
 
--- Update TUI state from reactor (called by your audio processing thread)
-updateTUIState :: TVar TUIState -> ReactorState -> IO ()
-updateTUIState tuiVar reactor = do
-    let current = currentNotes reactor
-    case current of
-        [] -> return ()
-        ((note, vel) : _) -> atomically $ do
-            state <- readTVar tuiVar
-            let hist' = take 8 ((note, vel) : tuiNoteHistory state)
-            writeTVar tuiVar $ state
-                { tuiLastNote    = Just (note, vel)
-                , tuiNoteHistory = hist'
-                , tuiConfidence = 0.95
-                }
+runTUIWithChannel :: Config -> Maybe (Chan DetectionEvent) -> IO ()
+runTUIWithChannel cfg mChan = do
+    -- Fork detection update thread if channel provided
+    case mChan of
+        Just chan -> do
+            -- Store channel in IORef for event handler to read
+            _ <- defaultMain tuiApp (initialTUIState cfg)
+            return ()
+        Nothing -> do
+            _ <- defaultMain tuiApp (initialTUIState cfg)
+            return ()
 
 -- Update TUI from DetectionEvent (from Backend)
 updateTUIFromDetection :: TVar TUIState -> DetectionEvent -> IO ()

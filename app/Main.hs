@@ -9,7 +9,7 @@ import DeMoDNote.Backend
 import DeMoDNote.OSC
 import DeMoDNote.Monitor
 import DeMoDNote.Types
-import DeMoDNote.TUI (runTUI)
+import DeMoDNote.TUI (runTUI, updateTUIFromDetection)
 import DeMoDNote.Preset (getPresetByName, listPresets)
 import DeMoDNote.Scale (getScaleByName, allScaleNames)
 import DeMoDNote.Arpeggio (createArpeggio, majorChord, upPattern)
@@ -17,6 +17,7 @@ import qualified DeMoDNote.BPM as BPM
 import Katip
 import Control.Concurrent.Async
 import Control.Concurrent.STM
+import Control.Concurrent (forkIO, threadDelay, readChan)
 import System.Exit
 import System.IO (stdout)
 import qualified Data.Text as T
@@ -146,4 +147,5 @@ runWithTUI :: Maybe FilePath -> IO ()
 runWithTUI mCfg = do
   cfg <- loadConfig mCfg
   putStrLn "Starting in TUI mode..."
+  putStrLn "Press Ctrl+C to exit"
   runTUI cfg
