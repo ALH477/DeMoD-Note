@@ -51,6 +51,8 @@ data ReactorState = ReactorState
   , onsetFeatures   :: !OnsetFeatures
   , lastOnsetTime   :: !TimeStamp
   , config          :: !Config
+  , reactorBPM      :: !Double
+  , reactorThreshold :: !Double
   } deriving (Show)
 
 emptyReactorState :: Config -> ReactorState
@@ -61,6 +63,8 @@ emptyReactorState cfg = ReactorState
   , onsetFeatures = defaultOnsetFeatures
   , lastOnsetTime = 0
   , config = cfg
+  , reactorBPM = 120.0
+  , reactorThreshold = -40.0
   }
 
 -- MIDI Event with timing
