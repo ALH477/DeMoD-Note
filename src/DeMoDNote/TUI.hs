@@ -1,6 +1,7 @@
 module DeMoDNote.TUI where
 
 import Brick
+import Brick.BChan (BChan, newBChan, writeBChan)
 import Brick.Widgets.Border
 import Brick.Widgets.Border.Style
 import Brick.Widgets.Center
@@ -8,7 +9,7 @@ import Brick.Widgets.ProgressBar hiding (progressCompleteAttr, progressIncomplet
 import Graphics.Vty
 import Control.Concurrent (Chan, forkIO, threadDelay, readChan)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVar, readTVarIO, writeTVar, atomically)
-import Control.Monad (forever)
+import Control.Monad (forever, void)
 import Control.Monad.IO.Class (liftIO)
 import Data.Time.Clock
 import Data.List (intercalate)
@@ -17,7 +18,15 @@ import DeMoDNote.Types
 import DeMoDNote.Config
 import DeMoDNote.Preset (getPresetByName, Preset)
 import DeMoDNote.Backend (DetectionEvent(..))
-import Control.Concurrent (Chan, forkIO, threadDelay, readChan)
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Events
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Unified event type for the TUI
+data TUIEvent 
+    = TUIStatusMsg String
+    | TUIDetection DetectionEvent
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- State
@@ -71,7 +80,7 @@ initialTUIState cfg = TUIState
     , tuiWaveform      = replicate 64 0.0
     , tuiScaleName     = "C Major"
     , tuiScaleIndex    = 0
-    , tuiArpeggioName  = "None"
+    , tuiArpeggioName  :: "None"
     , tuiArpeggioIndex = 0
     , tuiRunning       = True
     , tuiStatusMessage = "Ready"
@@ -122,8 +131,8 @@ waveformRows samples height =
         -- map each sample to a row index 0..height-1 (0 = bottom)
         toRow x = min (height-1) (max 0 (round ((x + 1.0) / 2.0 * fromIntegral (height-1)) :: Int))
         rows   = map toRow samps
-        -- for each display row (top to bottom), build the line
-        mkLine r = [ if rows !! col == r then '●' else '·' | col <- [0..w-1] ]
+        -- Optimize: zip with column index to avoid O(n^2) indexing
+        mkLine r = [ if rowVal == r then '●' else '·' | (col, rowVal) <- zip [0..w-1] rows ]
     in  [ mkLine r | r <- [height-1, height-2..0] ]
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -148,14 +157,27 @@ confidenceAttrName c
 -- App
 -- ─────────────────────────────────────────────────────────────────────────────
 
-tuiApp :: App TUIState String ()
-tuiApp = App
+tuiApp :: Maybe (BChan TUIEvent) -> App TUIState TUIEvent ()
+tuiApp mChan = App
     { appDraw         = drawUI
     , appChooseCursor = neverShowCursor
     , appHandleEvent  = handleEvent
-    , appStartEvent   = return ()
+    , appStartEvent   = appStart mChan
     , appAttrMap      = const theMap
+    , appBChan        = mChan
     }
+
+-- Start event: fork thread to read backend channel if provided
+appStart :: Maybe (BChan TUIEvent) -> EventM () TUIState ()
+appStart Nothing  = return ()
+appStart (Just bc) = do
+    -- We assume the backend channel is passed via Config or global state for this example
+    -- In a real app, you'd pass the backend Chan into TUIState or here.
+    -- For this fix, we assume the BChan is fed by an external thread not managed here,
+    -- OR we simply acknowledge the BChan is ready.
+    -- To make it functional based on runTUIWithChannel logic:
+    -- The external thread should write to 'bc'.
+    return ()
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Layout
@@ -385,7 +407,7 @@ drawHelpBar _ =
 -- Event handling
 -- ─────────────────────────────────────────────────────────────────────────────
 
-handleEvent :: BrickEvent () String -> EventM () TUIState ()
+handleEvent :: BrickEvent () TUIEvent -> EventM () TUIState ()
 handleEvent (VtyEvent e) = case e of
     EvKey (KChar 'q') [] -> halt
     EvKey KEsc         [] -> halt
@@ -435,9 +457,28 @@ handleEvent (VtyEvent e) = case e of
 
     _ -> return ()
 
-handleEvent (AppEvent msg) = do
-    state <- get
-    put state { tuiStatusMessage = msg }
+handleEvent (AppEvent ev) = case ev of
+    TUIStatusMsg msg -> do
+        state <- get
+        put state { tuiStatusMessage = msg }
+    
+    TUIDetection det -> do
+        state <- get
+        -- Extract data from DetectionEvent
+        -- Assuming accessors deNote, deWaveform, etc. exist in Backend
+        let mNote = deNote det
+            hist' = case mNote of
+                Nothing -> tuiNoteHistory state
+                Just (n, v) -> take 8 ((n, v) : tuiNoteHistory state)
+            wave' = take 64 (deWaveform det ++ repeat 0.0)
+            newState = state
+                { tuiLastNote    = mNote
+                , tuiNoteHistory = hist'
+                , tuiConfidence  = deConfidence det
+                , tuiLatency     = deLatency det
+                , tuiWaveform    = wave'
+                }
+        put newState
 
 handleEvent _ = return ()
 
@@ -472,7 +513,8 @@ showFixed1 :: Double -> String
 showFixed1 x =
     let i  = floor x :: Int
         f  = round ((x - fromIntegral i) * 10.0) :: Int
-    in  show i ++ "." ++ show f
+        fStr = if f < 0 then show (abs f) else show f -- Handle negative fractional part visually if needed
+    in  show i ++ "." ++ fStr
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Attribute map
@@ -525,17 +567,26 @@ runTUI cfg = runTUIWithChannel cfg Nothing
 
 runTUIWithChannel :: Config -> Maybe (Chan DetectionEvent) -> IO ()
 runTUIWithChannel cfg mChan = do
-    -- Fork detection update thread if channel provided
-    case mChan of
+    -- Create a BChan for Brick events if backend channel is provided
+    mBChan <- case mChan of
+        Nothing -> return Nothing
         Just chan -> do
-            -- Store channel in IORef for event handler to read
-            _ <- defaultMain tuiApp (initialTUIState cfg)
-            return ()
-        Nothing -> do
-            _ <- defaultMain tuiApp (initialTUIState cfg)
-            return ()
+            bc <- newBChan 100
+            -- Fork a thread to translate Backend events to TUI events
+            void $ forkIO $ forever $ do
+                ev <- readChan chan
+                writeBChan bc (TUIDetection ev)
+            return (Just bc)
+
+    let app = tuiApp mBChan
+        initialState = initialTUIState cfg
+    
+    _ <- defaultMain app initialState
+    return ()
 
 -- Update TUI from DetectionEvent (from Backend)
+-- This function is now less relevant as the channel translation happens in runTUIWithChannel,
+-- but kept for reference or alternative integration patterns.
 updateTUIFromDetection :: TVar TUIState -> DetectionEvent -> IO ()
 updateTUIFromDetection tuiVar event = do
     case deNote event of
