@@ -15,6 +15,7 @@ import Data.Maybe (fromMaybe)
 import DeMoDNote.Types
 import DeMoDNote.Config
 import DeMoDNote.Preset (getPresetByName, Preset)
+import DeMoDNote.Backend (DetectionEvent(..))
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- State
@@ -460,7 +461,24 @@ updateTUIState tuiVar reactor = do
             writeTVar tuiVar $ state
                 { tuiLastNote    = Just (note, vel)
                 , tuiNoteHistory = hist'
-                , tuiConfidence  = 0.95   -- replace with real detector output
+                , tuiConfidence = 0.95
+                }
+
+-- Update TUI from DetectionEvent (from Backend)
+updateTUIFromDetection :: TVar TUIState -> DetectionEvent -> IO ()
+updateTUIFromDetection tuiVar event = do
+    case deNote event of
+        Nothing -> return ()
+        Just (note, vel) -> atomically $ do
+            state <- readTVar tuiVar
+            let hist' = take 8 ((note, vel) : tuiNoteHistory state)
+                wave' = take 64 (deWaveform event ++ repeat 0.0)
+            writeTVar tuiVar $ state
+                { tuiLastNote    = Just (note, vel)
+                , tuiNoteHistory = hist'
+                , tuiConfidence = deConfidence event
+                , tuiLatency    = deLatency event
+                , tuiWaveform   = wave'
                 }
 
 -- Demo helpers

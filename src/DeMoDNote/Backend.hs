@@ -1,6 +1,19 @@
 {-# LANGUAGE BangPatterns #-}
 
-module DeMoDNote.Backend where
+module DeMoDNote.Backend (
+    module DeMoDNote.Types,
+    module DeMoDNote.Config, 
+    module DeMoDNote.Detector,
+    DetectionEvent(..),
+    getDetectionChannel,
+    getCurrentDetection,
+    runBackend,
+    runBackendSimple
+) where
+
+import DeMoDNote.Types
+import DeMoDNote.Config
+import DeMoDNote.Detector
 
 import Sound.JACK
 import qualified Sound.JACK.Audio as JAudio
@@ -8,7 +21,7 @@ import qualified Data.Vector.Storable as VS
 import qualified Data.ByteString as BS
 import Control.Monad
 import Control.Concurrent.STM
-import Control.Concurrent (threadDelay, forkIO)
+import Control.Concurrent (threadDelay, forkIO, Chan, newChan, writeChan, readChan)
 import Control.Exception (bracket, try, SomeException, finally)
 import Data.IORef
 import Data.Bits ((.|.), (.&.))
@@ -21,6 +34,15 @@ import System.Posix.Signals (installHandler, sigINT, sigTERM, Handler(..))
 import DeMoDNote.Types
 import DeMoDNote.Config
 import DeMoDNote.Detector
+
+-- Detection event for TUI updates
+data DetectionEvent = DetectionEvent
+    { deNote       :: Maybe (Int, Int)  -- (note, velocity)
+    , deConfidence :: Double
+    , deLatency    :: Double
+    , deWaveform   :: [Double]
+    , deState      :: NoteState
+    }
 
 -- Get current time in microseconds
 getMicroTime :: IO Word64
@@ -108,6 +130,10 @@ data AudioState = AudioState
   , sampleCounter  :: !(IORef Word64)
   , running        :: !(IORef Bool)
   , lastNote       :: !(IORef (Maybe (Int, Int)))
+  , detectionChan  :: !(Chan DetectionEvent)
+  , lastConfidence :: !(IORef Double)
+  , lastLatency    :: !(IORef Double)
+  , lastWaveform   :: !(IORef [Double])
   }
 
 newAudioState :: Int -> IO AudioState
@@ -116,7 +142,11 @@ newAudioState bufferSize = do
   counter <- newIORef 0
   runRef <- newIORef True
   lastNoteRef <- newIORef Nothing
-  return $ AudioState ring counter runRef lastNoteRef
+  chan <- newChan
+  confRef <- newIORef 0.0
+  latRef <- newIORef 0.0
+  waveRef <- newIORef (replicate 64 0.0)
+  return $ AudioState ring counter runRef lastNoteRef chan confRef latRef waveRef
 
 -- Main JACK backend using mainMono (simplest working approach)
 runBackend :: Config -> TVar ReactorState -> IO ()
@@ -191,8 +221,16 @@ detectorThread cfg audioState stateVar = do
             -- Convert Int16 to Int for detector
             let samplesInt = VS.map fromIntegral samples
             
+            -- Convert to waveform for TUI (normalized -1 to 1)
+            let waveform = VS.toList $ VS.map (\x -> fromIntegral x / 32768.0 :: Double) samples
+            
             -- Run detection
             result <- detect cfg samplesInt currentTime Idle defaultPLLState defaultOnsetFeatures
+            
+            -- Update state refs for TUI
+            writeIORef (lastConfidence audioState) (confidence result)
+            writeIORef (lastLatency audioState) 2.66  -- Simplified latency
+            writeIORef (lastWaveform audioState) waveform
             
             -- Handle detection result
             case detectedNote result of
@@ -207,6 +245,16 @@ detectorThread cfg audioState stateVar = do
                               " conf=" ++ show (confidence result) ++ 
                               " state=" ++ show (noteState result)
                     writeIORef (lastNote audioState) $ Just (note, vel)
+                    
+                    -- Send detection event to TUI
+                    let event = DetectionEvent 
+                          { deNote = Just (note, vel)
+                          , deConfidence = confidence result
+                          , deLatency = 2.66
+                          , deWaveform = waveform
+                          , deState = noteState result
+                          }
+                    writeChan (detectionChan audioState) event
           
           detectorLoop
 
@@ -228,3 +276,22 @@ runBackendSimple cfg state = do
     return sample
   
   putStrLn "DeMoD-Note stopped."
+
+-- Get detection events channel (for TUI integration)
+getDetectionChannel :: AudioState -> Chan DetectionEvent
+getDetectionChannel = detectionChan
+
+-- Get current detection state for TUI polling
+getCurrentDetection :: AudioState -> IO DetectionEvent
+getCurrentDetection audioState = do
+  note <- readIORef (lastNote audioState)
+  conf <- readIORef (lastConfidence audioState)
+  lat <- readIORef (lastLatency audioState)
+  wave <- readIORef (lastWaveform audioState)
+  return DetectionEvent
+    { deNote = note
+    , deConfidence = conf
+    , deLatency = lat
+    , deWaveform = wave
+    , deState = Idle
+    }
