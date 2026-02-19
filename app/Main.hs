@@ -9,7 +9,7 @@ import DeMoDNote.Backend
 import DeMoDNote.OSC
 import DeMoDNote.Monitor
 import DeMoDNote.Types
-import DeMoDNote.TUI (runTUI, updateTUIFromDetection)
+import DeMoDNote.TUI (runTUI)
 import DeMoDNote.Preset (getPresetByName, listPresets)
 import DeMoDNote.Scale (getScaleByName, allScaleNames)
 import DeMoDNote.Arpeggio (createArpeggio, majorChord, upPattern)

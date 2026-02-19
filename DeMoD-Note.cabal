@@ -4,7 +4,7 @@ version:            1.0.0
 synopsis:           Deterministic Monophonic Note Detector
 license:            MIT
 author:             DeMoD-Note Project
-homepage:           https://github.com/DeMoD-Note/DeMoD-Note
+homepage:           https://github.com/ALH477/DeMoD-Note
 build-type:         Simple
 
 library
@@ -44,6 +44,8 @@ library
     , unix
     , brick                >= 2.0
     , vty                  >=6.0 && <7.0
+    , vty-crossplatform    >=0.4
+    , mtl                  ^>=2.3
     , time
     , directory
     , filepath
@@ -55,6 +57,14 @@ library
 test-suite demod-note-tests
   type:              exitcode-stdio-1.0
   main-is:           Spec.hs
+  other-modules:
+    DeMoDNote.ArpeggioSpec
+    DeMoDNote.AudioValidationSpec
+    DeMoDNote.BPMSpec
+    DeMoDNote.ConfigSpec
+    DeMoDNote.DetectorSpec
+    DeMoDNote.PresetSpec
+    DeMoDNote.ScaleSpec
   hs-source-dirs:    test
   default-language:  Haskell2010
   ghc-options:       -Wall -threaded
