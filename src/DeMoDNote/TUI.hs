@@ -339,12 +339,12 @@ initialTUIState cfg tip = TUIState
     , tuiScaleIndex    = 0
     , tuiArpeggioIndex = 0
     , tuiRunning       = True
-    , tuiStatusMessage = "WAITING FOR JACK..."
+    , tuiStatusMessage = "READY  ─  PRESS ENTER TO START"
     , tuiTuningMode    = False
     , tuiTuningNote    = Nothing
     , tuiTuningCents   = 0.0
     , tuiTuningInTune  = False
-    , tuiJackStatus    = JackDisconnected  -- Start disconnected, update when JACK connects
+    , tuiJackStatus    = JackConnected  -- Assume connected, backend handles JACK
     }
 
 -- ─────────────────────────────────────────────────────────────────────────────
