@@ -209,7 +209,7 @@ nearestNote freq
             centsBelow = freqToCents freq (midiNote - 1)
             centsAbove = freqToCents freq (midiNote + 1)
             centsCurrent = freqToCents freq midiNote
-            (closestNote, closestCents) = minimumBy compare 
+            (closestNote, closestCents) = minimumBy (\x y -> compare (abs (snd x)) (abs (snd y))) 
                 [(midiNote, centsCurrent), (midiNote - 1, centsBelow), (midiNote + 1, centsAbove)]
         in (closestNote, closestCents)
 

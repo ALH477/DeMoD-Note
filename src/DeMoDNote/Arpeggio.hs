@@ -2,11 +2,13 @@
 
 module DeMoDNote.Arpeggio (
     ArpeggioPattern(..),
-    Arpeggio,
+    Arpeggio(..),
     ChordQuality(..),
+    arpChord,
     createArpeggio,
     getArpeggioNotes,
     getArpeggioWithRhythm,
+    applyPattern,
     -- Pattern generators
     upPattern,
     downPattern,
@@ -153,12 +155,11 @@ chordToNotes root quality octave =
 
 -- Generate arpeggio pattern
 getArpeggioNotes :: Arpeggio -> Int -> [Int]
-getArpeggioNotes arp _bpm = 
+getArpeggioNotes arp startOctave = 
     let (root, quality) = arpChord arp
         intervals = getChordIntervals quality
-        base = noteNameToMidi root 3  -- Start at octave 3
+        base = noteNameToMidi root startOctave
         octaves = arpOctaves arp
-        -- Generate notes across octaves
         allNotes = concatMap (\o -> map (+ (base + o * 12)) intervals) [0..octaves-1]
     in applyPattern (arpPattern arp) allNotes
 

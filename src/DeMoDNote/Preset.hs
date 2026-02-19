@@ -6,6 +6,7 @@ module DeMoDNote.Preset (
     PresetLibrary,
     BuiltInPreset(..),
     defaultPresets,
+    defaultPreset,
     loadPreset,
     savePreset,
     listPresets,
@@ -13,6 +14,7 @@ module DeMoDNote.Preset (
     applyPreset,
     addCustomPreset,
     deletePreset,
+    generatePresetTOML,
     -- Built-in presets
     jazzWalkingBass,
     classicalGuitar,

@@ -4,6 +4,8 @@ module DeMoDNote.BPM (
     BPMMode(..),
     TimeSignature(..),
     QuantizationGrid(..),
+    getGridDivision,
+    defaultTimeSignature,
     newBPMState,
     tapBeat,
     getCurrentBPM,

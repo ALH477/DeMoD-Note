@@ -185,13 +185,15 @@ makeScale root sType = Scale {
     scaleIntervals = getIntervals sType
 }
 
--- Get all notes in a scale within a MIDI range
+-- Get all notes in a scale within a specific octave range
 getScaleNotes :: Scale -> Int -> Int -> [Int]
-getScaleNotes scale low high = 
-    let rootMidi = noteNameToMidi (scaleRoot scale) 0
+getScaleNotes scale lowOctave highOctave = 
+    let root = scaleRoot scale
         intervals = scaleIntervals scale
-        allNotes = concatMap (\oct -> map (\n -> n + (oct * 12) + rootMidi) intervals) [0..10]
-    in filter (\n -> n >= low && n <= high) allNotes
+        allNotes = [noteNameToMidi root octave + interval 
+                   | octave <- [lowOctave..highOctave], 
+                     interval <- intervals]
+    in filter (<= 127) allNotes
 
 -- Transpose a scale by N semitones
 transposeScale :: Scale -> Int -> Scale
