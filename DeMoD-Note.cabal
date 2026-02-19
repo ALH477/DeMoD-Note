@@ -52,6 +52,19 @@ library
     , containers
   pkgconfig-depends: jack >=1.9, fftw3
 
+test-suite demod-note-tests
+  type:              exitcode-stdio-1.0
+  main-is:           Spec.hs
+  hs-source-dirs:    test
+  default-language:  Haskell2010
+  ghc-options:       -Wall -threaded
+  build-depends:
+    , DeMoD-Note
+    , base                 >=4.18 && <5
+    , hspec                >=2.11 && <2.12
+    , QuickCheck          >=2.14 && <2.15
+    , quickcheck-instances >=0.3 && <0.4
+
 executable demod-note
   main-is:            Main.hs
   hs-source-dirs:     app
