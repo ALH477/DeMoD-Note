@@ -7,8 +7,7 @@ DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor wr
 ![output](https://github.com/user-attachments/assets/e28a6be8-e75b-403d-9d23-0b2886b5b774)
 
 
-<img width="1920" height="1150" alt="image" src="https://github.com/user-attachments/assets/3e019928-2561-4d5a-8f71-5fd203c703a4" />
-
+<img width="585" height="485" alt="DeMoD-Japan" src="https://github.com/user-attachments/assets/eb4148e2-d24f-4183-8142-5f48bf5e77ec" />
 
 ## Key Features
 
@@ -408,6 +407,9 @@ echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
   };
 }
 ```
+
+![demod](https://github.com/user-attachments/assets/1d15d102-5b9f-4b8e-81e8-c1d975a436ed)
+
 
 ## Contributing
 
