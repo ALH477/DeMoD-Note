@@ -1,6 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module DeMoDNote.OSC where
+module DeMoDNote.OSC (
+    module Sound.Osc,
+    module Sound.Osc.Datum,
+    OscCommand(..),
+    OscState(..),
+    newOscState,
+    startOSC,
+    OscClient(..),
+    createOscClient,
+    sendNoteOn,
+    sendNoteOff,
+    closeOscClient
+) where
 
 import Sound.Osc
 import Sound.Osc.Datum
@@ -157,3 +169,31 @@ sendReleaseNote = ReleaseNote
 
 sendLoadPreset :: String -> OscCommand
 sendLoadPreset = LoadPreset
+
+-- OSC Client for sending outbound messages (e.g., to MIDI bridge)
+-- Note: Full outbound OSC support requires more complex hosc integration
+-- For now, the architecture is in place and can be completed later
+data OscClient = OscClient
+    { oscTargetHost :: String
+    , oscTargetPort :: Int
+    }
+
+-- Create OSC client to send to target host:port
+createOscClient :: String -> Int -> IO OscClient
+createOscClient host port = do
+    putStrLn $ "Created OSC client for " ++ host ++ ":" ++ show port
+    return $ OscClient host port
+
+-- Send note trigger via OSC (stub - architecture ready for implementation)
+sendNoteOn :: OscClient -> Int -> Int -> IO ()
+sendNoteOn client note vel = do
+    putStrLn $ "[OSC] Note On: " ++ show note ++ " vel=" ++ show vel ++ " -> " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
+
+-- Send note off via OSC (stub - architecture ready for implementation)
+sendNoteOff :: OscClient -> Int -> IO ()
+sendNoteOff client note = do
+    putStrLn $ "[OSC] Note Off: " ++ show note ++ " -> " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
+
+-- Close OSC client
+closeOscClient :: OscClient -> IO ()
+closeOscClient _client = return ()

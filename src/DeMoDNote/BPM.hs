@@ -94,9 +94,9 @@ data BPMState = BPMState {
     bpmMode :: BPMMode,
     currentBPM :: TVar Double,
     targetBPM :: Double,
-    timeSignature :: TimeSignature,
-    quantization :: QuantizationGrid,
-    swing :: Double,
+    timeSignature :: TVar TimeSignature,
+    quantization :: TVar QuantizationGrid,
+    swing :: TVar Double,
     tapState :: TVar TapState,
     startTime :: Word64,
     lastBeatTime :: TVar Word64,
@@ -110,6 +110,9 @@ newBPMState :: IO BPMState
 newBPMState = do
     now <- getMicroTime
     bpmVar <- newTVarIO defaultBPM
+    tsVar <- newTVarIO defaultTimeSignature
+    quantVar <- newTVarIO Q16th
+    swingVar <- newTVarIO 0.0
     tapVar <- newTVarIO newTapState
     lastBeatVar <- newTVarIO now
     beatCountVar <- newTVarIO 0
@@ -119,9 +122,9 @@ newBPMState = do
         bpmMode = TapTempo,
         currentBPM = bpmVar,
         targetBPM = defaultBPM,
-        timeSignature = defaultTimeSignature,
-        quantization = Q16th,
-        swing = 0.0,
+        timeSignature = tsVar,
+        quantization = quantVar,
+        swing = swingVar,
         tapState = tapVar,
         startTime = now,
         lastBeatTime = lastBeatVar,
@@ -169,66 +172,66 @@ setBPM state bpm = do
 
 -- Set time signature
 setTimeSignature :: BPMState -> Int -> Int -> IO ()
-setTimeSignature _state beats noteValue = do
-    let _ts = TimeSignature beats noteValue
-    -- Update state (would need to modify the record)
-    return ()
+setTimeSignature state beats noteValue = do
+    let ts = TimeSignature beats noteValue
+    atomically $ writeTVar (timeSignature state) ts
 
 -- Set swing amount (0.0 - 1.0)
 setSwing :: BPMState -> Double -> IO ()
-setSwing _state amount = do
-    let _clamped = max 0.0 (min 1.0 amount)
-    return ()  -- Would update state record
+setSwing state amount = do
+    let clamped = max 0.0 (min 1.0 amount)
+    atomically $ writeTVar (swing state) clamped
 
 -- Set quantization
 setQuantization :: BPMState -> QuantizationGrid -> IO ()
-setQuantization _state _grid = return ()  -- Would update state record
+setQuantization state grid = do
+    atomically $ writeTVar (quantization state) grid
 
 -- Get quantization grid divisions
-getQuantizationGrid :: BPMState -> [Double]
-getQuantizationGrid state = 
-    let grid = quantization state
-        division = getGridDivision grid
-        beats = fromIntegral (tsBeats $ timeSignature state)
-    in if division == 0
+getQuantizationGrid :: BPMState -> IO [Double]
+getQuantizationGrid state = do
+    grid <- atomically $ readTVar (quantization state)
+    ts <- atomically $ readTVar (timeSignature state)
+    let division = getGridDivision grid
+        beats = fromIntegral (tsBeats ts)
+    return $ if division == 0
        then []
        else [0, division .. beats]
 
 -- Quantize a time to the grid
-quantizeToGrid :: BPMState -> Word64 -> Word64
-quantizeToGrid state time = 
-    let grid = quantization state
-    in if grid == QOff
-       then time
-       else
+quantizeToGrid :: BPMState -> Word64 -> IO Word64
+quantizeToGrid state time = do
+    grid <- atomically $ readTVar (quantization state)
+    if grid == QOff
+       then return time
+       else do
            let bpm = targetBPM state
                beatMs = 60000.0 / bpm
                gridMs = beatMs * getGridDivision grid
                timeMs = fromIntegral time / 1000.0
                gridTime = fromIntegral (round (timeMs / gridMs)) * gridMs
-           in round (gridTime * 1000)
+           return $ round (gridTime * 1000)
 
 -- Quantize a note onset to the beat grid
-quantizeNoteOnset :: BPMState -> Word64 -> Word64
-quantizeNoteOnset state onsetTime = 
+quantizeNoteOnset :: BPMState -> Word64 -> IO Word64
+quantizeNoteOnset state onsetTime = do
     let bpm = targetBPM state
         beatMs = 60000.0 / bpm
-        -- Calculate position within measure
-        start = startTime state
+    ts <- atomically $ readTVar (timeSignature state)
+    grid <- atomically $ readTVar (quantization state)
+    let start = startTime state
         elapsed = onsetTime - start
         elapsedMs = fromIntegral elapsed / 1000.0
         beatPos = elapsedMs / beatMs
-        measureLen = fromIntegral (tsBeats $ timeSignature state)
+        measureLen = fromIntegral (tsBeats ts)
         posInMeasure = beatPos `mod'` measureLen
-        -- Quantize
-        grid = quantization state
         division = getGridDivision grid
-    in if division == 0
-       then onsetTime
-       else
+    if division == 0
+       then return onsetTime
+       else do
            let quantizedPos = fromIntegral (round (posInMeasure / division)) * division
                offsetMs = (quantizedPos - posInMeasure) * beatMs
-           in onsetTime + round (offsetMs * 1000)
+           return $ onsetTime + round (offsetMs * 1000)
 
 -- Get current beat position
 getBeatPosition :: BPMState -> IO Double
@@ -245,7 +248,8 @@ getBeatPosition state = do
 isDownbeat :: BPMState -> IO Bool
 isDownbeat state = do
     pos <- getBeatPosition state
-    let measureLen = fromIntegral (tsBeats $ timeSignature state)
+    ts <- atomically $ readTVar (timeSignature state)
+    let measureLen = fromIntegral (tsBeats ts)
         posInMeasure = pos `mod'` measureLen
     return $ posInMeasure < 1.0
 
@@ -288,10 +292,10 @@ autoDetectBPM state onsets =
             else return Nothing
 
 -- Calculate swing offset for a specific beat
-swingOffset :: BPMState -> Int -> Double
-swingOffset state beatNum =
-    let swingAmt = swing state
-    in if swingAmt == 0.0 || even beatNum
+swingOffset :: BPMState -> Int -> IO Double
+swingOffset state beatNum = do
+    swingAmt <- atomically $ readTVar (swing state)
+    return $ if swingAmt == 0.0 || even beatNum
        then 0.0
        else swingAmt * 0.5  -- Delay odd beats for swing feel
 

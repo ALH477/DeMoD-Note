@@ -16,6 +16,7 @@ module DeMoDNote.Backend (
 import DeMoDNote.Types
 import DeMoDNote.Config
 import DeMoDNote.Detector
+import DeMoDNote.OSC
 
 -- import Sound.JACK  -- Currently unused, kept for potential future use
 -- import Sound.JACK.Exception  -- Kept for potential future use
@@ -30,7 +31,7 @@ import Foreign.C.Types (CFloat(..))
 import Data.Int (Int16)
 import System.CPUTime (getCPUTime)
 import System.Posix.Signals (installHandler, sigINT, sigTERM, Handler(..))
-import Control.Exception (try, throwIO, SomeException, Exception(..))
+import Control.Exception (try, throwIO, SomeException, Exception(..), catch)
 
 -- Jack connection status
 data JackStatus 
@@ -165,6 +166,7 @@ data AudioState = AudioState
   , lastConfidence :: !(IORef Double)
   , lastLatency    :: !(IORef Double)
   , lastWaveform   :: !(IORef [Double])
+  , oscClient      :: !(IORef (Maybe OscClient))
   }
 
 newAudioState :: Int -> IO AudioState
@@ -176,7 +178,8 @@ newAudioState bufSize = do
   confRef <- newIORef 0.0
   latRef <- newIORef 0.0
   waveRef <- newIORef (replicate 64 0.0)
-  return $ AudioState ring counter runRef noteRef confRef latRef waveRef
+  oscRef <- newIORef Nothing
+  return $ AudioState ring counter runRef noteRef confRef latRef waveRef oscRef
 
 -- Main JACK backend with detection
 runBackend :: Config -> TVar ReactorState -> IO ()
@@ -188,6 +191,15 @@ runBackend cfg state = do
   
   audioState <- newAudioState 8192
   jackState <- newJackState 5  -- Max 5 reconnection attempts
+  
+  -- Create OSC client for MIDI bridge (default port 57120)
+  mOscClient <- (do
+    client <- createOscClient "127.0.0.1" 57120
+    putStrLn "OSC client connected (sends to MIDI bridge on port 57120)"
+    return $ Just client) `catch` (\e -> do
+    putStrLn $ "Could not create OSC client: " ++ show (e :: SomeException)
+    return Nothing)
+  writeIORef (oscClient audioState) mOscClient
   
   _ <- installHandler sigINT (Catch $ do
     writeIORef (running audioState) False
@@ -299,6 +311,11 @@ handleNoteChange audioState Nothing _ _ _ _ = do
   case curr of
     Just (note, _) -> do
       putStrLn $ "Note Off: " ++ show note
+      -- Send OSC note off
+      mClient <- readIORef (oscClient audioState)
+      case mClient of
+        Just client -> sendNoteOff client note `catch` (\(_ :: SomeException) -> return ())
+        Nothing -> return ()
       writeIORef (currentNote audioState) Nothing
     Nothing -> return ()
 
@@ -313,6 +330,11 @@ handleNoteChange audioState (Just (note, vel)) _noteState detTuningNote detTunin
             Just t -> " [tuning: " ++ midiToNoteName t ++ " " ++ show (round detTuningCents :: Int) ++ " cents" ++ if detTuningInTune then " ✓]" else "]"
             Nothing -> ""
       putStrLn $ "Note On: " ++ show note ++ " vel=" ++ show vel ++ tuningInfo
+      -- Send OSC note on
+      mClient <- readIORef (oscClient audioState)
+      case mClient of
+        Just client -> sendNoteOn client note vel `catch` (\(_ :: SomeException) -> return ())
+        Nothing -> return ()
       writeIORef (currentNote audioState) $ Just (note, vel)
 
 -- Simple passthrough mode

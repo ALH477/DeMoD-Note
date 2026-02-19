@@ -21,13 +21,14 @@ module DeMoDNote.SoundFont (
     startFluidSynth,
     stopFluidSynth,
     isFluidSynthRunning,
-    restartFluidSynth
+    restartFluidSynth,
+    reloadSoundFont
 ) where
 
 import System.Directory (doesFileExist, getHomeDirectory, listDirectory, createDirectoryIfMissing)
 import System.FilePath ((</>), takeFileName, takeExtension)
-import System.Process (ProcessHandle)  -- Needed for type
--- import System.IO (hClose, hGetContents, Handle)  -- Kept for future use
+import System.Process (ProcessHandle, createProcess, proc, terminateProcess, getProcessExitCode, StdStream(..), spawnCommand)
+
 -- import Control.Concurrent (threadDelay)  -- Kept for future use
 -- import Control.Monad (filterM, when)  -- Kept for future use
 import Data.List (isSuffixOf, find)
@@ -220,13 +221,16 @@ sendMidiProgramChange _manager program bank = do
 startFluidSynth :: SoundFontManager -> FilePath -> IO SoundFontManager
 startFluidSynth manager soundfontPath = do
     let port = sfmFluidSynthPort manager
-        _cmd = "fluidsynth -a jack -m jack -g 0.8 -p DeMoDNote \"" ++ soundfontPath ++ "\" &"
+        cmd = "fluidsynth"
+        args = ["-a", "jack", "-m", "jack", "-g", "0.8", "-p", "DeMoDNote", soundfontPath]
     
     putStrLn $ "Starting FluidSynth with: " ++ soundfontPath
-    -- In real implementation, would properly capture process handle
+    -- Spawn the process in background
+    ph <- spawnCommand (unwords $ cmd : args)
     return $ manager {
-        sfmFluidSynthProcess = Nothing,  -- Would be Just handle
-        sfmFluidSynthPort = port
+        sfmFluidSynthProcess = Just ph,
+        sfmFluidSynthPort = port,
+        sfmCurrentSoundFont = Just $ SoundFont soundfontPath (takeFileName soundfontPath) 0 True [0..127]
     }
 
 -- Stop FluidSynth
@@ -234,17 +238,21 @@ stopFluidSynth :: SoundFontManager -> IO SoundFontManager
 stopFluidSynth manager = do
     case sfmFluidSynthProcess manager of
         Nothing -> return manager
-        Just _ph -> do
-            -- terminateProcess ph  -- Would kill the process
+        Just ph -> do
+            terminateProcess ph
             putStrLn "Stopping FluidSynth"
             return $ manager { sfmFluidSynthProcess = Nothing }
 
 -- Check if FluidSynth is running
-isFluidSynthRunning :: SoundFontManager -> Bool
+isFluidSynthRunning :: SoundFontManager -> IO Bool
 isFluidSynthRunning manager = 
     case sfmFluidSynthProcess manager of
-        Nothing -> False
-        Just _ -> True  -- Would check if process is actually alive
+        Nothing -> return False
+        Just ph -> do
+            exitCode <- getProcessExitCode ph
+            return $ case exitCode of
+                Nothing -> True  -- Process still running
+                Just _ -> False  -- Process has exited
 
 -- Restart FluidSynth with current soundfont
 restartFluidSynth :: SoundFontManager -> IO SoundFontManager
@@ -253,3 +261,20 @@ restartFluidSynth manager = do
     case sfmCurrentSoundFont manager' of
         Nothing -> return manager'
         Just sf -> startFluidSynth manager' (sfPath sf)
+
+-- Reload soundfont into currently running FluidSynth
+reloadSoundFont :: SoundFontManager -> FilePath -> IO (Either String SoundFontManager)
+reloadSoundFont manager path = do
+    result <- validateSoundFont path
+    case result of
+        Left err -> return $ Left err
+        Right _sf -> do
+            running <- isFluidSynthRunning manager
+            if running
+                then do
+                    manager' <- stopFluidSynth manager
+                    manager'' <- startFluidSynth manager' path
+                    return $ Right manager''
+                else do
+                    manager' <- startFluidSynth manager path
+                    return $ Right manager'

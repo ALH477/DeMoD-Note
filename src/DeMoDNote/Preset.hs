@@ -27,8 +27,9 @@ module DeMoDNote.Preset (
 import GHC.Generics
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.List (sort)
-import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory, removeFile)
+import Data.List (sort, isPrefixOf, isSuffixOf, find)
+import Control.Monad (forM)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getHomeDirectory, removeFile, listDirectory)
 import System.FilePath ((</>))
 import DeMoDNote.Config
 import DeMoDNote.Scale (Scale, ScaleType(..), NoteName(..), makeScale)
@@ -188,12 +189,19 @@ getPresetDir = do
 -- Load all presets (built-in + custom)
 loadAllPresets :: IO PresetLibrary
 loadAllPresets = do
-    -- Start with built-in presets
     let builtins = defaultPresets
-    -- Try to load custom presets from files
-    _presetDir <- getPresetDir
-    -- TODO: Load .toml files from _presetDir
-    return builtins
+    presetDir <- getPresetDir
+    dirExists <- doesFileExist presetDir
+    if dirExists
+        then do
+            files <- listDirectory presetDir
+            let tomlFiles = filter (".toml" `isSuffixOf`) files
+            customPresets <- forM tomlFiles $ \f -> do
+                let path = presetDir </> f
+                loadPreset path
+            let loaded = [p | Right p <- customPresets]
+            return $ Map.union (Map.fromList [(presetName p, p) | p <- loaded]) builtins
+        else return builtins
 
 -- List all available preset names
 listPresets :: IO [String]
@@ -230,8 +238,26 @@ loadPreset path = do
     if not exists
     then return $ Left $ "Preset file not found: " ++ path
     else do
-        -- TODO: Parse TOML and create Preset
-        return $ Right defaultPreset
+        content <- readFile path
+        case parseSimplePreset content of
+            Left err -> return $ Left $ "Parse error: " ++ err
+            Right p -> return $ Right p
+
+-- Simple parser that extracts preset name from TOML comment
+parseSimplePreset :: String -> Either String Preset
+parseSimplePreset content = 
+    case nameLine of
+        Nothing -> Left "Missing 'name' field in preset"
+        Just n -> Right $ defaultPreset { presetName = strip n }
+  where
+    lines' = lines content
+    nameLine = do
+        l <- find (\line -> "name" `isPrefixOf` stripComments line) lines'
+        case break (== '=') l of
+            (_, rest) -> let val = strip rest in 
+                if null val then Nothing else Just val
+    stripComments l = if '#' `elem` l then takeWhile (/= '#') l else l
+    strip s = dropWhile (== ' ') $ takeWhile (/= ' ') $ dropWhile (== ' ') $ dropWhile (/= ' ') s
 
 -- Save preset to file (TOML)
 savePreset :: Preset -> FilePath -> IO ()
