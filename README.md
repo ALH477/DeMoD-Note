@@ -4,6 +4,9 @@
 
 DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor written in Haskell. It performs hybrid pitch detection from live audio input with deterministic timing guarantees optimized for real-time kernels. Outputs MIDI events over JACK to drive FluidSynth or any MIDI synthesizer with sub-3ms latency for high frequencies and intelligent bass handling.
 
+<img width="1920" height="1150" alt="image" src="https://github.com/user-attachments/assets/3e019928-2561-4d5a-8f71-5fd203c703a4" />
+
+
 ## Key Features
 
 - **Triple-Path Hybrid Detection:**
