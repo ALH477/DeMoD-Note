@@ -2,7 +2,7 @@
 
 **Deterministic Monophonic Note Detector**
 
-DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor written in Haskell. It performs hybrid pitch detection from live audio input with deterministic timing guarantees optimized for real-time kernels. Outputs MIDI events over JACK to drive FluidSynth or any MIDI synthesizer with sub-3ms latency for high frequencies and intelligent bass handling.
+DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor written in Haskell. It performs hybrid pitch detection from live audio input with deterministic timing guarantees optimized for real-time kernels. Outputs note events via OSC (UDP 57120) for integration with synthesizers like SuperCollider, FluidSynth, or any OSC-compatible audio software.
 
 ![output](https://github.com/user-attachments/assets/e28a6be8-e75b-403d-9d23-0b2886b5b774)
 
@@ -32,10 +32,10 @@ DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor wr
   - Finish-first note policy
 
 - **JACK Integration:**
-  - Native JACK backend (128-sample buffers @ 96kHz)
+  - Native JACK backend (256-sample buffers @ 48kHz default)
   - Real-time safe processing
-  - MIDI output with timing compensation
-  - OSC control server (UDP 57120)
+  - OSC note output (UDP 57120) for synth integration
+  - OSC control server for external control
   - Web dashboard (/status endpoint)
   - Auto-reconnection with graceful error handling
 
@@ -59,17 +59,50 @@ DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor wr
 ```bash
 git clone https://github.com/ALH477/DeMoD-Note.git
 cd DeMoD-Note
-nix develop
-cabal run DeMoD-Note -- --help
+nix run . -- --help
 ```
 
-Start JACK with 96kHz sample rate and 128-sample buffers:
+Start with JACK (PipeWire on modern Linux):
 ```bash
-jackd -d alsa -r 96000 -p 128 &
-cabal run DeMoD-Note
+# Using nix (recommended)
+nix run . -- -- run
+
+# Or with TUI
+nix run . -- -- run -i
+# or
+nix run . -- -- tui
 ```
 
-Connect your instrument to `DeMoD-Note:input` and `DeMoD-Note:midi_out` to your synthesizer.
+Connect your audio source to `DeMoDNote:input` and `DeMoDNote:output` to your speakers/recorder.
+
+### PipeWire Users (NixOS, Fedora, etc.)
+
+If you're using PipeWire instead of JACK:
+
+```bash
+# Check available ports
+wpctl status
+
+# Or use qpwgraph for visual patchbay
+nix-shell -p qpwgraph
+qpwgraph
+```
+
+Look for `DeMoDNote:input` and `DeMoDNote:output` ports in your patchbay.
+
+### JACK Users
+
+Start JACK with 48kHz sample rate (default):
+```bash
+jackd -d alsa -r 48000 -p 256 &
+nix run . -- -- run
+```
+
+Use QjackCtl or `jack_connect` to route audio:
+```bash
+jack_connect system:capture_1 DeMoDNote:input
+jack_connect DeMoDNote:output system:playback_1
+```
 
 ## Running Tests
 
@@ -244,7 +277,7 @@ audioSource = do
 │ Detector Thread (Priority 98, SCHED_FIFO)             │
 │ - Read from ring buffer                               │
 │ - Pitch detection (PLL → Autocorrelation → YIN)       │
-│ - Write MIDI events                                   │
+│ - Write OSC note events                               │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -333,7 +366,7 @@ Key settings in `config.toml`:
 | TUI | 652 | Terminal UI with Brick |
 | Detector | 361 | Triple-path pitch detection |
 | Preset | 357 | Preset management |
-| Backend | 353 | JACK audio + MIDI handling |
+| Backend | 353 | JACK audio + OSC handling |
 | Arpeggio | 338 | Chord/note patterns |
 | BPM | 327 | Tempo/time utilities |
 | Scale | 302 | Musical scales |
