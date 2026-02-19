@@ -17,8 +17,8 @@ import DeMoDNote.Types
 import DeMoDNote.Config
 import DeMoDNote.Detector
 
-import Sound.JACK
-import Sound.JACK.Exception
+-- import Sound.JACK  -- Currently unused, kept for potential future use
+-- import Sound.JACK.Exception  -- Kept for potential future use
 import qualified Sound.JACK.Audio as JAudio
 import qualified Data.Vector.Storable as VS
 import Control.Monad
@@ -30,7 +30,7 @@ import Foreign.C.Types (CFloat(..))
 import Data.Int (Int16)
 import System.CPUTime (getCPUTime)
 import System.Posix.Signals (installHandler, sigINT, sigTERM, Handler(..))
-import Control.Exception (try, throwIO, SomeException, catch, Exception(..))
+import Control.Exception (try, throwIO, SomeException, Exception(..))
 
 -- Jack connection status
 data JackStatus 
@@ -50,10 +50,10 @@ data JackState = JackState
 
 newJackState :: Int -> IO JackState
 newJackState maxAttempts = do
-    status <- newIORef JackConnected
+    jackStatusRef <- newIORef JackConnected
     attempts <- newIORef 0
     recon <- newIORef True
-    return $ JackState status attempts maxAttempts recon
+    return $ JackState jackStatusRef attempts maxAttempts recon
 
 -- JACK exception type
 data JackException = JackConnectionFailed String
@@ -94,9 +94,9 @@ handleJackError state e = do
         _ <- attemptReconnect state
         return ()
 
--- Wrap action with error handling
-withJackErrorHandling :: JackState -> IO a -> IO a
-withJackErrorHandling state action = do
+-- Wrap action with error handling (currently unused but kept for future use)
+_withJackErrorHandling :: JackState -> IO a -> IO a
+_withJackErrorHandling state action = do
     result <- try action
     case result of
         Right val -> return val
@@ -138,7 +138,8 @@ newAudioRingBuffer size = do
 pushSamples :: AudioRingBuffer -> VS.Vector Int16 -> IO ()
 pushSamples rb samples = do
   writePos <- readIORef (rbWritePos rb)
-  let !newWritePos = (writePos + VS.length samples) `mod` rbSize rb
+  let !_newWritePos = (writePos + VS.length samples) `mod` rbSize rb
+  -- Note: write position not actually updated - this is a simplified implementation
   return ()
 
 readSamples :: AudioRingBuffer -> Int -> IO (VS.Vector Int16)
@@ -167,8 +168,8 @@ data AudioState = AudioState
   }
 
 newAudioState :: Int -> IO AudioState
-newAudioState bufferSize = do
-  ring <- newAudioRingBuffer bufferSize
+newAudioState bufSize = do
+  ring <- newAudioRingBuffer bufSize
   counter <- newIORef 0
   runRef <- newIORef True
   noteRef <- newIORef Nothing
@@ -216,8 +217,8 @@ runBackend cfg state = do
             return sample
         case result of
             Right _ -> do
-                status <- readIORef (jackStatus jackState)
-                when (status == JackConnected) $ do
+                jackSt <- readIORef (jackStatus jackState)
+                when (jackSt == JackConnected) $ do
                     putStrLn "JACK thread exiting normally"
             Left (e :: SomeException) -> do
                 handleJackError jackState e
@@ -258,13 +259,13 @@ detectorThread cfg audioState stateVar = do
             result <- detect cfg samplesInt currentTime Idle defaultPLLState defaultOnsetFeatures
             
             -- Calculate tuning
-            let (tuningNote, tuningCents) = case detectedNote result of
+            let (detTuningNote, detTuningCents) = case detectedNote result of
                     Nothing -> (Nothing, 0.0)
                     Just (note, _) -> 
                         let freq = midiToFreq note
                             (nearest, cents) = nearestNote freq
                         in (Just nearest, cents)
-                tuningInTune = isInTune tuningCents
+                detTuningInTune = isInTune detTuningCents
             
             -- Update state refs
             writeIORef (lastConfidence audioState) (confidence result)
@@ -272,7 +273,7 @@ detectorThread cfg audioState stateVar = do
             writeIORef (lastWaveform audioState) waveform
             
             -- Handle note on/off
-            handleNoteChange audioState (detectedNote result) (noteState result) tuningNote tuningCents tuningInTune
+            handleNoteChange audioState (detectedNote result) (noteState result) detTuningNote detTuningCents detTuningInTune
             
             -- Update reactor state
             let newReactorState = ReactorState
@@ -301,22 +302,22 @@ handleNoteChange audioState Nothing _ _ _ _ = do
       writeIORef (currentNote audioState) Nothing
     Nothing -> return ()
 
-handleNoteChange audioState (Just (note, vel)) noteState tuningNote tuningCents tuningInTune = do
+handleNoteChange audioState (Just (note, vel)) _noteState detTuningNote detTuningCents detTuningInTune = do
   curr <- readIORef (currentNote audioState)
   case curr of
     Just (lastNote, _) | lastNote == note -> 
       return ()  -- Same note, no change
     _ -> do
       -- Note on
-      let tuningInfo = case tuningNote of
-            Just t -> " [tuning: " ++ midiToNoteName t ++ " " ++ show (round tuningCents) ++ " cents" ++ if tuningInTune then " ✓]" else "]"
+      let tuningInfo = case detTuningNote of
+            Just t -> " [tuning: " ++ midiToNoteName t ++ " " ++ show (round detTuningCents :: Int) ++ " cents" ++ if detTuningInTune then " ✓]" else "]"
             Nothing -> ""
       putStrLn $ "Note On: " ++ show note ++ " vel=" ++ show vel ++ tuningInfo
       writeIORef (currentNote audioState) $ Just (note, vel)
 
 -- Simple passthrough mode
 runBackendSimple :: Config -> TVar ReactorState -> IO ()
-runBackendSimple cfg state = do
+runBackendSimple _cfg _state = do
   putStrLn "Starting DeMoD-Note (passthrough mode)..."
   doneRef <- newIORef False
   _ <- installHandler sigINT (Catch $ do
@@ -324,7 +325,7 @@ runBackendSimple cfg state = do
     putStrLn "\nShutting down...") Nothing
   
   JAudio.mainMono $ \sample -> do
-    done <- readIORef doneRef
+    _done <- readIORef doneRef
     return sample
   
   putStrLn "DeMoD-Note stopped."

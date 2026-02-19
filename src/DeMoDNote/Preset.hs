@@ -18,7 +18,10 @@ module DeMoDNote.Preset (
     classicalGuitar,
     bluesLead,
     electronic,
-    practiceMode
+    practiceMode,
+    -- Parser utilities
+    parseScaleType,
+    parseNoteName
 ) where
 
 import GHC.Generics
@@ -188,8 +191,8 @@ loadAllPresets = do
     -- Start with built-in presets
     let builtins = defaultPresets
     -- Try to load custom presets from files
-    presetDir <- getPresetDir
-    -- TODO: Load .toml files from presetDir
+    _presetDir <- getPresetDir
+    -- TODO: Load .toml files from _presetDir
     return builtins
 
 -- List all available preset names
@@ -290,7 +293,7 @@ deletePreset name = do
     then removeFile path
     else putStrLn $ "Preset not found: " ++ name
 
--- Convert string to scale type
+-- Convert string to scale type (for future use)
 parseScaleType :: String -> ScaleType
 parseScaleType "major" = Major
 parseScaleType "minor" = MinorNatural
@@ -309,7 +312,7 @@ parseScaleType "aeolian" = Aeolian
 parseScaleType "locrian" = Locrian
 parseScaleType _ = Major  -- Default
 
--- Convert string to note name
+-- Convert string to note name (for future use)
 parseNoteName :: String -> NoteName
 parseNoteName "c" = C
 parseNoteName "c#" = Cs

@@ -30,9 +30,9 @@ module DeMoDNote.BPM (
 ) where
 
 import Data.Word (Word64)
-import Data.List (sort, nub)
+import Data.List (sort)
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import Control.Concurrent.STM (TVar, newTVar, newTVarIO, readTVar, writeTVar, atomically)
+import Control.Concurrent.STM (TVar, newTVarIO, readTVar, writeTVar, atomically)
 
 -- BPM ranges
 defaultBPM :: Double
@@ -169,20 +169,20 @@ setBPM state bpm = do
 
 -- Set time signature
 setTimeSignature :: BPMState -> Int -> Int -> IO ()
-setTimeSignature state beats noteValue = do
-    let ts = TimeSignature beats noteValue
+setTimeSignature _state beats noteValue = do
+    let _ts = TimeSignature beats noteValue
     -- Update state (would need to modify the record)
     return ()
 
 -- Set swing amount (0.0 - 1.0)
 setSwing :: BPMState -> Double -> IO ()
-setSwing state amount = do
-    let clamped = max 0.0 (min 1.0 amount)
+setSwing _state amount = do
+    let _clamped = max 0.0 (min 1.0 amount)
     return ()  -- Would update state record
 
 -- Set quantization
 setQuantization :: BPMState -> QuantizationGrid -> IO ()
-setQuantization state grid = return ()  -- Would update state record
+setQuantization _state _grid = return ()  -- Would update state record
 
 -- Get quantization grid divisions
 getQuantizationGrid :: BPMState -> [Double]
@@ -264,7 +264,7 @@ autoDetectBPM state onsets =
         then return Nothing
         else do
             -- Find most common interval (mode)
-            let avgInterval = fromIntegral (sum validIntervals) / fromIntegral (length validIntervals)
+            let _avgInterval = fromIntegral (sum validIntervals) / fromIntegral (length validIntervals)
                 -- Try to detect if intervals are consistent with a tempo
                 intervalsMs = map (\i -> fromIntegral i / 1000.0) validIntervals
                 bpms = map (\ms -> 60000.0 / ms) intervalsMs
@@ -313,4 +313,4 @@ msToBeat bpm ms = (ms * bpm) / 60000.0
 
 -- Floating point modulo
 mod' :: Double -> Double -> Double
-mod' x y = x - y * fromIntegral (floor (x / y))
+mod' x y = x - y * fromIntegral (floor (x / y) :: Int)

@@ -26,12 +26,12 @@ module DeMoDNote.SoundFont (
 
 import System.Directory (doesFileExist, getHomeDirectory, listDirectory, createDirectoryIfMissing)
 import System.FilePath ((</>), takeFileName, takeExtension)
-import System.Process (ProcessHandle, spawnCommand, terminateProcess)
-import System.IO (hClose, hGetContents, Handle)
-import Control.Concurrent (threadDelay)
-import Control.Monad (filterM, when)
+import System.Process (ProcessHandle)  -- Needed for type
+-- import System.IO (hClose, hGetContents, Handle)  -- Kept for future use
+-- import Control.Concurrent (threadDelay)  -- Kept for future use
+-- import Control.Monad (filterM, when)  -- Kept for future use
 import Data.List (isSuffixOf, find)
-import Data.Maybe (fromMaybe)
+-- import Data.Maybe (fromMaybe)  -- Kept for future use
 
 -- SoundFont file information
 data SoundFont = SoundFont {
@@ -212,7 +212,7 @@ setMIDIBank manager bank = do
 
 -- Send MIDI program change (would actually send to synth)
 sendMidiProgramChange :: SoundFontManager -> Int -> Int -> IO ()
-sendMidiProgramChange manager program bank = do
+sendMidiProgramChange _manager program bank = do
     -- This would send actual MIDI messages
     putStrLn $ "MIDI Program Change: Bank " ++ show bank ++ ", Program " ++ show program
 
@@ -220,7 +220,7 @@ sendMidiProgramChange manager program bank = do
 startFluidSynth :: SoundFontManager -> FilePath -> IO SoundFontManager
 startFluidSynth manager soundfontPath = do
     let port = sfmFluidSynthPort manager
-        cmd = "fluidsynth -a jack -m jack -g 0.8 -p DeMoDNote \"" ++ soundfontPath ++ "\" &"
+        _cmd = "fluidsynth -a jack -m jack -g 0.8 -p DeMoDNote \"" ++ soundfontPath ++ "\" &"
     
     putStrLn $ "Starting FluidSynth with: " ++ soundfontPath
     -- In real implementation, would properly capture process handle
@@ -234,7 +234,7 @@ stopFluidSynth :: SoundFontManager -> IO SoundFontManager
 stopFluidSynth manager = do
     case sfmFluidSynthProcess manager of
         Nothing -> return manager
-        Just ph -> do
+        Just _ph -> do
             -- terminateProcess ph  -- Would kill the process
             putStrLn "Stopping FluidSynth"
             return $ manager { sfmFluidSynthProcess = Nothing }

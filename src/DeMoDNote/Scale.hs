@@ -23,8 +23,7 @@ module DeMoDNote.Scale (
     chromaticScale
 ) where
 
-import Data.List (find, elemIndex)
-import Data.Maybe (fromMaybe)
+
 
 -- MIDI note numbers: 0-127
 -- C4 = 60

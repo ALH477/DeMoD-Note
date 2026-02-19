@@ -3,11 +3,10 @@
 module DeMoDNote.Detector where
 
 import qualified Data.Vector.Storable as VS
-import Numeric.FFT.Vector.Invertible as FFT
-import Data.Complex
-import Data.List (sortBy)
+-- import Numeric.FFT.Vector.Invertible as FFT  -- Kept for potential future use
+-- import Data.Complex  -- Kept for potential future use
 import Data.Ord (comparing)
-import Data.Word (Word64)
+-- import Data.Word (Word64)  -- Kept for potential future use
 import DeMoDNote.Config
 import DeMoDNote.Types
 
@@ -66,7 +65,7 @@ findZeroCrossing v
 
 -- Update onset features
 updateOnsetFeatures :: Config -> VS.Vector Double -> VS.Vector Double -> OnsetFeatures -> OnsetFeatures
-updateOnsetFeatures cfg curr prev prevFeatures =
+updateOnsetFeatures cfg curr prev _prevFeatures =
   let sf = calcSpectralFlux curr prev
       et = calcEnergyTransient curr prev
       -- Phase deviation calculated separately per-call
@@ -110,7 +109,9 @@ updatePLL samples pll =
 detectFastFreq :: VS.Vector Double -> Maybe (Double, Double)  -- (freq, confidence)
 detectFastFreq samples =
   let crossings = findAllZeroCrossings samples
-      periods = zipWith (-) (tail crossings) crossings
+      periods = case crossings of
+                  (_:rest) -> zipWith (-) rest crossings
+                  [] -> []
   in if length periods < 2
      then Nothing
      else 
@@ -162,7 +163,7 @@ detectSlowFreq samples =
       -- YIN difference function (simplified)
       tauMax = min n (floor (detectorSampleRate / bassMinFreq))
       yinDiff tau = 
-        let diffs = [(buf VS.! i - buf VS.! (i + tau))^2 | i <- [0..n-tau-1]]
+        let diffs = [(buf VS.! i - buf VS.! (i + tau))^(2 :: Int) | i <- [0..n-tau-1]]
         in sum diffs / fromIntegral (n - tau)
       -- Find minimum below threshold
       search tau 
@@ -230,16 +231,13 @@ midiToNoteName n =
 
 -- Main detection function with state machine
 detect :: Config -> VS.Vector Int -> TimeStamp -> NoteState -> PLLState -> OnsetFeatures -> IO DetectionResult
-detect cfg samplesInt16 currentTime prevState prevPLL prevOnset = do
+detect cfg samplesInt16 currentTime prevState _prevPLL prevOnset = do
   let samples = normalizeInt16 samplesInt16
-      n = VS.length samples
+      -- n = VS.length samples -- Not currently used
   
   -- Update onset features
   let currDouble = VS.map realToFrac samples :: VS.Vector Double
       newOnset = updateOnsetFeatures cfg currDouble currDouble prevOnset  -- Simplified: use same for prev
-  
-  -- Update PLL
-  let newPLL = updatePLL samples prevPLL
   
   -- Check for onset
   let isOnset = detectOnset cfg newOnset
@@ -285,7 +283,7 @@ detect cfg samplesInt16 currentTime prevState prevPLL prevOnset = do
                else pure $ DetectionResult Nothing 0.0 prevState Nothing
          else pure $ DetectionResult Nothing 0.0 prevState Nothing
     
-    FastNote note vel startTime ->
+    FastNote note vel _startTime ->
       -- Keep outputting until new onset or timeout
       if isOnset
       then pure $ DetectionResult (Just (note, vel)) 1.0 (Attacking currentTime) Nothing
@@ -314,7 +312,8 @@ detect cfg samplesInt16 currentTime prevState prevPLL prevOnset = do
       else pure $ DetectionResult (Just (note, vel)) 1.0 prevState Nothing
     
     Releasing startTime ->
-      let elapsedMs = fromIntegral (currentTime - startTime) / 1000.0
+      let elapsedMs :: Double
+          elapsedMs = fromIntegral (currentTime - startTime) / 1000.0
       in if elapsedMs > 50.0  -- 50ms release time
          then pure $ DetectionResult Nothing 0.0 Idle Nothing
          else pure $ DetectionResult Nothing 0.0 prevState Nothing
@@ -324,4 +323,4 @@ maximumBy :: (a -> a -> Ordering) -> [a] -> a
 maximumBy cmp = foldl1 (\x y -> if cmp x y == GT then x else y)
 
 mod' :: Double -> Double -> Double
-mod' x y = x - y * fromIntegral (floor (x / y))
+mod' x y = x - y * fromIntegral (floor (x / y) :: Int)

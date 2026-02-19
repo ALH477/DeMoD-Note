@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module DeMoDNote.Arpeggio (
     ArpeggioPattern(..),
     Arpeggio,
@@ -30,9 +32,9 @@ module DeMoDNote.Arpeggio (
     allArpeggioPatterns
 ) where
 
-import DeMoDNote.Scale (NoteName(..), noteNameToMidi, Scale(..), ScaleType(..), makeScale, scaleType, scaleRoot)
+import DeMoDNote.Scale (NoteName(..), noteNameToMidi, Scale(..), ScaleType(..))
 import System.Random (randomRIO)
-import Data.List (permutations, nub)
+import Data.List (permutations)
 
 -- Chord qualities
 data ChordQuality = 
@@ -151,7 +153,7 @@ chordToNotes root quality octave =
 
 -- Generate arpeggio pattern
 getArpeggioNotes :: Arpeggio -> Int -> [Int]
-getArpeggioNotes arp bpm = 
+getArpeggioNotes arp _bpm = 
     let (root, quality) = arpChord arp
         intervals = getChordIntervals quality
         base = noteNameToMidi root 3  -- Start at octave 3
@@ -179,14 +181,18 @@ applyPattern StrumUp notes = notes
 applyPattern StrumDown notes = reverse notes
 applyPattern WalkingBass notes = 
     -- Jazz walking bass: root, 5th, approach tone, target
-    concatMap (\root -> [root, head (drop 2 notes), root - 1, root + 1]) (takeEvery 3 notes)
+    concatMap (\root -> [root, safeHeadDef 0 (drop 2 notes), root - 1, root + 1]) (takeEvery 3 notes)
     where takeEvery n xs = case drop (n-1) xs of
             (y:ys) -> y : takeEvery n ys
             [] -> []
+          safeHeadDef def [] = def
+          safeHeadDef _ (x:_) = x
 applyPattern Fingerpicking notes = 
     -- Classical guitar fingerpicking: bass, 3rd, 2nd, 1st
-    let bass = head notes
-        others = tail notes
+    let bass = case notes of
+                 (b:_) -> b
+                 [] -> 60  -- Default to middle C if no notes
+        others = drop 1 notes
     in concat $ replicate 4 $ [bass] ++ reverse others
 applyPattern (Euclidean pulses steps) notes = 
     let pattern = euclideanPattern pulses steps
@@ -212,7 +218,7 @@ getArpeggioWithRhythm arp bpm =
         beatMs = 60000.0 / fromIntegral bpm  -- Quarter note duration
         stepMs = beatMs / 4  -- 16th notes
         swing = arpSwing arp
-        times = map (\i -> 
+        times = map (\(i :: Int) -> 
             let base = fromIntegral i * stepMs
                 offset = if odd i then swing * stepMs * 0.5 else 0
             in base + offset) [0..]
@@ -297,8 +303,12 @@ allArpeggioPatterns = [
 -- Shuffle for random pattern (IO)
 shuffleIO :: [a] -> IO [a]
 shuffleIO [] = return []
+shuffleIO (x:[]) = return [x]
 shuffleIO xs = do
     i <- randomRIO (0, length xs - 1)
-    let (left, (x:right)) = splitAt i xs
-    rest <- shuffleIO (left ++ right)
-    return $ x : rest
+    let (left, right) = splitAt i xs
+    case right of
+      [] -> shuffleIO xs  -- Retry if we somehow got an empty right part
+      (x':right') -> do
+        rest <- shuffleIO (left ++ right')
+        return $ x' : rest
