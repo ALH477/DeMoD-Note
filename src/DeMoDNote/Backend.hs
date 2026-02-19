@@ -306,18 +306,19 @@ jackSession cfg audioState jackState stateVar = do
         JACK.withClientDefault "DeMoDNote" $ \client ->
             JACK.withPort client "input" $ \inPort ->
                 JACK.withPort client "output" $ \outPort ->
-                    JACK.withProcess client (jackProcessCallback audioState inPort outPort) $ do
-                        -- All IO actions lifted into ExceptionalT context
-                        sr <- Trans.lift $ JACK.getSampleRate client
-                        bs <- Trans.lift $ JACK.getBufferSize client
-                        
-                        Trans.lift $ atomically $ writeTVar (sampleRate audioState) sr
-                        Trans.lift $ atomically $ writeTVar (bufferSize audioState) bs
-                        Trans.lift $ writeIORef (jackStatus jackState) JackConnected
-                        
-                        Trans.lift $ logInfo $ "✅ JACK connected (SR=" ++ show sr ++ ", BS=" ++ show bs ++ ")"
-                        
-                        Trans.lift $ jackControlLoop audioState
+                    JACK.withProcess client (jackProcessCallback audioState inPort outPort) $
+                        JACK.withActivation client $ do
+                            -- All IO actions lifted into ExceptionalT context
+                            sr <- Trans.lift $ JACK.getSampleRate client
+                            bs <- Trans.lift $ JACK.getBufferSize client
+                            
+                            Trans.lift $ atomically $ writeTVar (sampleRate audioState) sr
+                            Trans.lift $ atomically $ writeTVar (bufferSize audioState) bs
+                            Trans.lift $ writeIORef (jackStatus jackState) JackConnected
+                            
+                            Trans.lift $ logInfo $ "✅ JACK connected (SR=" ++ show sr ++ ", BS=" ++ show bs ++ ")"
+                            
+                            Trans.lift $ jackControlLoop audioState
 
     logInfo "JACK session ended cleanly"
 
