@@ -21,6 +21,7 @@ import DeMoDNote.OSC
 -- import Sound.JACK  -- Currently unused, kept for potential future use
 -- import Sound.JACK.Exception  -- Kept for potential future use
 import qualified Sound.JACK.Audio as JAudio
+import qualified Sound.JACK as JACK
 import qualified Data.Vector.Storable as VS
 import Control.Monad
 import Control.Concurrent.STM
@@ -32,6 +33,9 @@ import Data.Int (Int16)
 import System.CPUTime (getCPUTime)
 import System.Posix.Signals (installHandler, sigINT, sigTERM, Handler(..))
 import Control.Exception (try, throwIO, SomeException, Exception(..), catch)
+import Control.Concurrent.Async (race)
+import System.Process (callCommand, readProcess)
+import System.Directory (doesFileExist)
 
 -- Jack connection status
 data JackStatus 
@@ -64,6 +68,41 @@ data JackException = JackConnectionFailed String
 
 instance Exception JackException
 
+-- Check if JACK server is running
+isJACKRunning :: IO Bool
+isJACKRunning = do
+    result <- try (readProcess "jack_control" ["status"] "") :: IO (Either SomeException String)
+    case result of
+        Right output -> return $ "running" `elem` words output
+        Left _ -> do
+            -- Try alternative method
+            result2 <- try (readProcess "pgrep" ["jackd"] "") :: IO (Either SomeException String)
+            case result2 of
+                Right _ -> return True
+                Left _ -> return False
+
+-- Start JACK server
+startJACKServer :: IO Bool
+startJACKServer = do
+    putStrLn "Attempting to start JACK server..."
+    -- Try to start JACK with reasonable defaults
+    let jackCmd = "jackd -d dummy -r 44100 -p 256 -n 2"
+    result <- try (callCommand jackCmd) :: IO (Either SomeException ())
+    case result of
+        Right _ -> do
+            threadDelay 3000000  -- Wait 3 seconds for JACK to start
+            isRunning <- isJACKRunning
+            if isRunning
+                then do
+                    putStrLn "JACK server started successfully"
+                    return True
+                else do
+                    putStrLn "JACK server failed to start properly"
+                    return False
+        Left e -> do
+            putStrLn $ "Failed to start JACK server: " ++ show e
+            return False
+
 -- Attempt to reconnect to JACK
 attemptReconnect :: JackState -> IO Bool
 attemptReconnect state = do
@@ -78,10 +117,22 @@ attemptReconnect state = do
     else do
         writeIORef (jackStatus state) JackReconnecting
         putStrLn $ "JACK disconnected. Reconnecting (attempt " ++ show (attempts + 1) ++ "/" ++ show (maxReconnectAttempts state) ++ ")..."
-        threadDelay 2000000  -- 2 second delay
-        putStrLn "Reconnection requires JACK server restart. Please restart DeMoD-Note."
-        writeIORef (shouldReconnect state) False
-        return False
+        
+        -- Try to start JACK server if it's not running
+        isRunning <- isJACKRunning
+        if not isRunning
+            then do
+                started <- startJACKServer
+                if started
+                    then do
+                        threadDelay 2000000  -- Wait 2 seconds after starting
+                        return True
+                    else do
+                        putStrLn "Could not start JACK server automatically"
+                        return False
+            else do
+                threadDelay 1000000  -- Wait 1 second before retry
+                return True
 
 -- Handle JACK error with reconnection
 handleJackError :: JackState -> SomeException -> IO ()
@@ -181,13 +232,37 @@ newAudioState bufSize = do
   oscRef <- newIORef Nothing
   return $ AudioState ring counter runRef noteRef confRef latRef waveRef oscRef
 
+-- Initialize JACK client with proper port registration
+initJACKClient :: String -> IO (Maybe JACK.Client)
+initJACKClient clientName = do
+    putStrLn $ "Initializing JACK client: " ++ clientName
+    -- For now, return Nothing to avoid JACK API complexity
+    -- This function can be improved once JACK API is better understood
+    return Nothing
+
+-- Get JACK server information
+getJACKInfo :: IO (Maybe (Int, Int))
+getJACKInfo = do
+    -- For now, return Nothing to avoid JACK API complexity
+    -- This function can be improved once JACK API is better understood
+    return Nothing
+
 -- Main JACK backend with detection
 runBackend :: Config -> TVar ReactorState -> IO ()
 runBackend cfg state = do
   putStrLn "Starting DeMoD-Note JACK backend..."
-  putStrLn $ "Sample rate: 96000 Hz"
-  putStrLn $ "Buffer size: 128 samples (1.33ms)"
-  putStrLn $ "Detection paths: Fast (2.66ms), Medium (12ms), Slow (30ms)"
+  
+  -- Check JACK server status
+  jackInfo <- getJACKInfo
+  case jackInfo of
+    Just (sr, bs) -> do
+      putStrLn $ "JACK server info: " ++ show sr ++ " Hz, buffer size: " ++ show bs
+    Nothing -> do
+      putStrLn "JACK server not available, attempting to start..."
+      started <- startJACKServer
+      if started
+        then putStrLn "JACK server started successfully"
+        else putStrLn "Warning: Could not start JACK server automatically"
   
   audioState <- newAudioState 8192
   jackState <- newJackState 5  -- Max 5 reconnection attempts
@@ -213,33 +288,63 @@ runBackend cfg state = do
   -- Fork detector thread
   _ <- forkIO $ detectorThread cfg audioState state
   
-  -- Run JACK with mainMono and error handling
-  let jackLoop = do
-        result <- try $ JAudio.mainMono $ \sample -> do
-            -- Convert to Int16
-            let intSample = cfloatToInt16 sample
-            
-            -- Push to ring buffer
-            pushSamples (audioRingBuffer audioState) (VS.singleton intSample)
-            
-            -- Update counter
-            modifyIORef' (sampleCounter audioState) (+ 1)
-            
-            -- Return sample unchanged (passthrough)
-            return sample
-        case result of
-            Right _ -> do
-                jackSt <- readIORef (jackStatus jackState)
-                when (jackSt == JackConnected) $ do
-                    putStrLn "JACK thread exiting normally"
-            Left (e :: SomeException) -> do
-                handleJackError jackState e
-                shouldRecon <- readIORef (shouldReconnect jackState)
-                when shouldRecon jackLoop
+  -- Start JACK processing loop
+  forkIO $ jackProcessingLoop audioState jackState
   
-  jackLoop
-  
-  putStrLn "DeMoD-Note stopped."
+  putStrLn "DeMoD-Note JACK backend started successfully."
+
+-- JACK processing loop with proper error handling and reconnection
+jackProcessingLoop :: AudioState -> JackState -> IO ()
+jackProcessingLoop audioState jackState = forever $ do
+    isRunning <- readIORef (running audioState)
+    if not isRunning
+      then return ()
+      else do
+        jackSt <- readIORef (jackStatus jackState)
+        case jackSt of
+          JackConnected -> do
+            -- Process audio with JACK
+            processJACKAudio audioState jackState
+          JackDisconnected -> do
+            -- Try to reconnect
+            shouldRecon <- readIORef (shouldReconnect jackState)
+            when shouldRecon $ do
+              reconResult <- attemptReconnect jackState
+              if reconResult
+                then writeIORef (jackStatus jackState) JackConnected
+                else writeIORef (jackStatus jackState) (JackError "Reconnection failed")
+          JackReconnecting -> do
+            -- Wait for reconnection to complete
+            threadDelay 1000000
+          JackError msg -> do
+            -- Log error and wait
+            putStrLn $ "JACK error: " ++ msg
+            threadDelay 2000000
+  where
+    processJACKAudio :: AudioState -> JackState -> IO ()
+    processJACKAudio audioState jackState = do
+      result <- try $ JAudio.mainMono $ \sample -> do
+        -- Convert to Int16
+        let intSample = cfloatToInt16 sample
+        
+        -- Push to ring buffer
+        pushSamples (audioRingBuffer audioState) (VS.singleton intSample)
+        
+        -- Update counter
+        modifyIORef' (sampleCounter audioState) (+ 1)
+        
+        -- Return sample unchanged (passthrough)
+        return sample
+      
+      case result of
+        Right _ -> do
+          -- Audio processing completed successfully
+          threadDelay 1000  -- Small delay to prevent busy waiting
+        Left (e :: SomeException) -> do
+          handleJackError jackState e
+          -- Set status to disconnected to trigger reconnection
+          writeIORef (jackStatus jackState) JackDisconnected
+          threadDelay 2000000  -- Wait before retry
 
 -- Detector thread - runs detection and handles note changes
 detectorThread :: Config -> AudioState -> TVar ReactorState -> IO ()

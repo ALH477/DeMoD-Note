@@ -42,6 +42,7 @@ library
     , text
     , array
     , unix
+    , network
     , brick                >= 2.0
     , vty                  >=6.0 && <7.0
     , vty-crossplatform    >=0.4
@@ -74,6 +75,7 @@ test-suite demod-note-tests
     , hspec                >=2.11 && <2.13
     , QuickCheck          >=2.14 && <2.16
     , quickcheck-instances >=0.3 && <0.4
+    , process
 
 executable demod-note
   main-is:            Main.hs

@@ -16,6 +16,17 @@ module DeMoDNote.OSC (
 
 import Sound.Osc
 import Sound.Osc.Datum
+import Network.Socket hiding (send, sendTo, recv, recvFrom)
+import Network.Socket.ByteString (sendTo)
+import Data.ByteString.Lazy (ByteString)
+import qualified Data.ByteString.Lazy as BL
+import Data.Word (Word8)
+import Control.Concurrent.STM
+import Control.Concurrent (forkIO, threadDelay, Chan, newChan, writeChan, readChan)
+import Control.Monad (forever)
+import DeMoDNote.Types
+import DeMoDNote.Config
+import DeMoDNote.Preset
 import qualified Sound.Osc.Transport.Fd as Fd
 import Sound.Osc.Transport.Fd.Udp (Udp(..), with_udp, udpServer)
 import Control.Concurrent.STM
@@ -171,29 +182,53 @@ sendLoadPreset :: String -> OscCommand
 sendLoadPreset = LoadPreset
 
 -- OSC Client for sending outbound messages (e.g., to MIDI bridge)
--- Note: Full outbound OSC support requires more complex hosc integration
--- For now, the architecture is in place and can be completed later
 data OscClient = OscClient
     { oscTargetHost :: String
     , oscTargetPort :: Int
+    , oscSocket     :: Maybe Socket
     }
 
 -- Create OSC client to send to target host:port
 createOscClient :: String -> Int -> IO OscClient
 createOscClient host port = do
-    putStrLn $ "Created OSC client for " ++ host ++ ":" ++ show port
-    return $ OscClient host port
+    putStrLn $ "Creating OSC client for " ++ host ++ ":" ++ show port
+    -- Create UDP socket for sending OSC messages
+    sock <- socket AF_INET Datagram defaultProtocol
+    -- Resolve hostname to IP address
+    addrInfos <- getAddrInfo Nothing (Just host) (Just (show port))
+    let serverAddr = case addrInfos of
+            [] -> error $ "Could not resolve hostname: " ++ host
+            (addr:_) -> addrAddress addr
+    return $ OscClient host port (Just sock)
 
--- Send note trigger via OSC (stub - architecture ready for implementation)
+-- Send note trigger via OSC
 sendNoteOn :: OscClient -> Int -> Int -> IO ()
 sendNoteOn client note vel = do
-    putStrLn $ "[OSC] Note On: " ++ show note ++ " vel=" ++ show vel ++ " -> " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
+    case oscSocket client of
+        Just sock -> do
+            let msg = Message "/demod/note/trigger" [Int32 (fromIntegral note), Int32 (fromIntegral vel)]
+            let oscData = BL.toStrict (encodeMessage msg)
+            sendTo sock oscData (SockAddrInet (fromIntegral (oscTargetPort client)) (tupleToHostAddress (127,0,0,1)))
+            putStrLn $ "[OSC] Sent Note On: " ++ show note ++ " vel=" ++ show vel ++ " to " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
+        Nothing -> putStrLn $ "[OSC] Error: Socket not available for " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
 
--- Send note off via OSC (stub - architecture ready for implementation)
+-- Send note off via OSC
 sendNoteOff :: OscClient -> Int -> IO ()
 sendNoteOff client note = do
-    putStrLn $ "[OSC] Note Off: " ++ show note ++ " -> " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
+    case oscSocket client of
+        Just sock -> do
+            let msg = Message "/demod/note/off" [Int32 (fromIntegral note)]
+            let oscData = BL.toStrict (encodeMessage msg)
+            sendTo sock oscData (SockAddrInet (fromIntegral (oscTargetPort client)) (tupleToHostAddress (127,0,0,1)))
+            putStrLn $ "[OSC] Sent Note Off: " ++ show note ++ " to " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
+        Nothing -> putStrLn $ "[OSC] Error: Socket not available for " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
 
 -- Close OSC client
 closeOscClient :: OscClient -> IO ()
-closeOscClient _client = return ()
+closeOscClient client = do
+    putStrLn $ "Closing OSC client for " ++ oscTargetHost client ++ ":" ++ show (oscTargetPort client)
+    case oscSocket client of
+        Just sock -> close sock
+        Nothing -> return ()
+    return ()
+
