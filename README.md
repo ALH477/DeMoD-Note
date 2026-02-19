@@ -50,6 +50,16 @@ cabal run DeMoD-Note
 
 Connect your instrument to `DeMoD-Note:input` and `DeMoD-Note:midi_out` to your synthesizer.
 
+## Running Tests
+
+```bash
+# Using the helper script
+./tools/run-tests.sh
+
+# Or directly
+nix develop -c cabal test --enable-tests
+```
+
 ## Building All Outputs
 
 ```bash
@@ -179,7 +189,7 @@ Contributions welcome! Please ensure:
 - Code compiles with `-Wall -Werror`
 - No allocations in hot paths
 - Deterministic timing maintained
-- Tests pass: `cabal test`
+- Tests pass: `cabal test --enable-tests`
 
 ## License
 
