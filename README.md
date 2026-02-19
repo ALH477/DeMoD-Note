@@ -74,6 +74,7 @@ nix run . -- -- tui
 ```
 
 Connect your audio source to `DeMoDNote:input` and `DeMoDNote:output` to your speakers/recorder.
+<img width="1410" height="930" alt="image" src="https://github.com/user-attachments/assets/17085d12-b0ae-439a-ac78-9844f6823263" />
 
 ### PipeWire Users (NixOS, Fedora, etc.)
 
