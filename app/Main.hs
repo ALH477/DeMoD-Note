@@ -117,7 +117,11 @@ main = do
     
     TUI -> do
       cfg <- loadConfig Nothing
+      state <- newTVarIO (emptyReactorState cfg)
+      putStrLn "Starting DeMoD-Note TUI with JACK backend..."
+      backendAsync <- async $ runBackend cfg state
       runTUI cfg
+      cancel backendAsync
 
 runNormal :: Maybe FilePath -> Maybe String -> IO ()
 runNormal mCfg mPreset = do
@@ -162,6 +166,15 @@ runNormal mCfg mPreset = do
 runWithTUI :: Maybe FilePath -> IO ()
 runWithTUI mCfg = do
   cfg <- loadConfig mCfg
-  putStrLn "Starting in TUI mode..."
-  putStrLn "Press Ctrl+C to exit"
+  state <- newTVarIO (emptyReactorState cfg)
+  
+  putStrLn "Starting DeMoD-Note TUI with JACK backend..."
+  
+  -- Start backend services (JACK, OSC, monitor) in background
+  backendAsync <- async $ runBackend cfg state
+  
+  -- Run TUI with backend connection
   runTUI cfg
+  
+  -- Cleanup
+  cancel backendAsync
