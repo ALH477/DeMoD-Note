@@ -78,6 +78,8 @@ test-suite demod-note-tests
     , QuickCheck          >=2.14 && <2.16
     , quickcheck-instances >=0.3 && <0.4
     , process
+    , stm
+    , vector
 
 executable demod-note
   main-is:            Main.hs

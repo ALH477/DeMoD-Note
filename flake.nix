@@ -10,10 +10,9 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        hp = pkgs.haskellPackages;
-
+        
         # Build the package with tests enabled
-        demod-note = hp.callCabal2nix "DeMoD-Note" self {};
+        demod-note = pkgs.haskellPackages.callCabal2nix "DeMoD-Note" self {};
         
         # Run tests and return results
         runTests = pkgs.runCommand "demod-note-test-runner" {
