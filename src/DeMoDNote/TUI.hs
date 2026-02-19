@@ -10,6 +10,7 @@ import Graphics.Vty.CrossPlatform (mkVty)
 import Graphics.Vty.Config (defaultConfig)
 import Control.Concurrent (Chan, forkIO, readChan, threadDelay)
 import Control.Monad (forever, void)
+import qualified System.Process as System.Process
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Data.List (intercalate, intersperse)
@@ -265,8 +266,9 @@ jackGuide =
 -- ─────────────────────────────────────────────────────────────────────────────
 
 data TUIMode
-    = StartMode   -- animated splash / options screen
-    | MainMode    -- main monitoring interface
+    = StartMode      -- animated splash / options screen
+    | MainMode       -- main monitoring interface
+    | SoundFontMode  -- soundfont browser with donation prompt
     deriving (Eq)
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -484,8 +486,9 @@ tuiApp = App
 
 drawUI :: TUIState -> [Widget ()]
 drawUI state = case tuiMode state of
-    StartMode -> [drawStartMenu state]
-    MainMode  -> [drawMainUI   state]
+    StartMode     -> [drawStartMenu state]
+    MainMode      -> [drawMainUI   state]
+    SoundFontMode -> [drawSoundFontUI state]
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- START MENU
@@ -860,7 +863,7 @@ mainHelpBar :: Widget ()
 mainHelpBar = withAttr helpAttr $ padLeftRight 1 $
     str $ intercalate "  ·  "
         [ "[SPC] tap", "[s/S] scale", "[a/A] arpeg"
-        , "[t] tuner", "[c] theme", "[p] pause", "[r] reset", "[q] quit"
+        , "[t] tuner", "[f] font", "[c] theme", "[p] pause", "[r] reset", "[q] quit"
         ]
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -877,8 +880,9 @@ handleEvent (AppEvent TUITick) =
 handleEvent ev = do
     mode <- gets tuiMode
     case mode of
-        StartMode -> handleStartEvent ev
-        MainMode  -> handleMainEvent  ev
+        StartMode     -> handleStartEvent ev
+        MainMode      -> handleMainEvent  ev
+        SoundFontMode -> handleSoundFontEvent ev
 
 handleStartEvent :: BrickEvent () TUIEvent -> EventM () TUIState ()
 handleStartEvent (VtyEvent e) = case e of
@@ -953,6 +957,10 @@ handleMainEvent (VtyEvent e) = case e of
               , tuiStatusMessage = if m then "TUNER ON  ─  PLAY A NOTE" else "TUNER OFF"
               }
 
+    -- Open SoundFont browser
+    EvKey (KChar 'f') [] -> modify' $ \s ->
+        s { tuiMode = SoundFontMode }
+
     _ -> return ()
 
 handleMainEvent (AppEvent (TUIStatusMsg msg)) =
@@ -978,8 +986,68 @@ handleMainEvent (AppEvent (TUIDetection det)) = modify' $ \s ->
 
 handleMainEvent _ = return ()
 
+-- ── SoundFont mode event handler ─────────────────────────────────────────────
+
+handleSoundFontEvent :: BrickEvent () TUIEvent -> EventM () TUIState ()
+handleSoundFontEvent (VtyEvent e) = case e of
+    EvKey KEsc         [] -> modify' $ \s -> s { tuiMode = MainMode }
+    EvKey (KChar 'q')  [] -> modify' $ \s -> s { tuiMode = MainMode }
+    EvKey KEnter       [] -> do
+        -- Open browser to musical-artifacts.com for donation
+        _ <- liftIO $ System.Process.spawnCommand 
+            "xdg-open https://musical-artifacts.com 2>/dev/null || open https://musical-artifacts.com 2>/dev/null || echo 'Please visit https://musical-artifacts.com'"
+        modify' $ \s -> s 
+            { tuiMode = MainMode
+            , tuiStatusMessage = "SOUNDFONT: Visit musical-artifacts.com to download!"
+            }
+    _ -> return ()
+handleSoundFontEvent _ = return ()
+
 -- ─────────────────────────────────────────────────────────────────────────────
--- Helpers
+-- SoundFont UI
+-- ─────────────────────────────────────────────────────────────────────────────
+
+drawSoundFontUI :: TUIState -> Widget ()
+drawSoundFontUI state =
+    withBorderStyle retroBorder $
+    borderWithLabel (withAttr titleAttr $ str sfTitle) $
+    padAll 2 $
+    vBox
+        [ hCenter $ withAttr splashTitleAttr $ str "★  S O U N D F O N T  ★"
+        , str " "
+        , hCenter $ withAttr splashSubAttr $ str "Download SoundFonts from"
+        , str " "
+        , hCenter $ withAttr valueAttr $ str "musical-artifacts.com"
+        , str " "
+        , donationBanner
+        , str " "
+        , hCenter $ withAttr splashBodyAttr $ str "SoundFonts will be saved to:"
+        , str " "
+        , hCenter $ withAttr dimAttr $ str "/etc/demod/sf"
+        , hCenter $ withAttr dimAttr $ str "~/.local/share/soundfonts"
+        , str " "
+        , hCenter $ withAttr dimAttr $ str "Press [Enter] to open in browser"
+        , str " "
+        , hCenter $ pressEscapeWidget state
+        ]
+  where
+    sfTitle = " ◈  SOUNDFONT  ◈ "
+    donationBanner = withBorderStyle innerBorder $
+        border $ padAll 1 $ vBox
+            [ hCenter $ withAttr heroNoteAttr $ str "PLEASE SUPPORT THIS SERVICE!"
+            , str " "
+            , hCenter $ withAttr splashBodyAttr $ 
+                str "musical-artifacts.com is run by volunteers."
+            , hCenter $ withAttr splashBodyAttr $ 
+                str "Consider donating to keep it running."
+            ]
+
+pressEscapeWidget :: TUIState -> Widget ()
+pressEscapeWidget state =
+    let blinkOn = tuiTick state `mod` 2 == 0
+        atr     = if blinkOn then accentAttr else dimAttr
+    in  withAttr atr $ str "[Esc] Back  ·  [Enter] Open Browser"
+
 -- ─────────────────────────────────────────────────────────────────────────────
 
 cycleScale :: Int -> EventM () TUIState ()

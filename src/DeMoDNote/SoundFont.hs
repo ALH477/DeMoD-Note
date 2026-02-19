@@ -15,6 +15,7 @@ module DeMoDNote.SoundFont (
     sendMidiProgramChange,
     -- Default soundfonts
     defaultSoundFontPaths,
+    appSoundFontDir,
     systemSoundFontDir,
     userSoundFontDir,
     -- FluidSynth integration
@@ -27,7 +28,7 @@ module DeMoDNote.SoundFont (
 
 import System.Directory (doesFileExist, getHomeDirectory, listDirectory, createDirectoryIfMissing, getFileSize)
 import System.FilePath ((</>), takeFileName, takeExtension)
-import System.Process (ProcessHandle, createProcess, proc, terminateProcess, getProcessExitCode, StdStream(..), spawnCommand)
+import System.Process (ProcessHandle, terminateProcess, getProcessExitCode, spawnCommand)
 
 -- import Control.Concurrent (threadDelay)  -- Kept for future use
 -- import Control.Monad (filterM, when)  -- Kept for future use
@@ -55,6 +56,7 @@ data SoundFontInfo = SoundFontInfo {
 
 -- SoundFont manager state
 data SoundFontManager = SoundFontManager {
+    sfmAppDir :: FilePath,       -- /etc/demod/sf (app-specific)
     sfmSystemDir :: FilePath,
     sfmUserDir :: FilePath,
     sfmCurrentSoundFont :: Maybe SoundFont,
@@ -64,9 +66,14 @@ data SoundFontManager = SoundFontManager {
     sfmFluidSynthPort :: Int
 }
 
--- Default search paths for soundfonts
+-- Application-specific soundfont directory (admin-managed)
+appSoundFontDir :: FilePath
+appSoundFontDir = "/etc/demod/sf"
+
+-- Default search paths for soundfonts (priority order)
 defaultSoundFontPaths :: [FilePath]
 defaultSoundFontPaths = [
+    "/etc/demod/sf",           -- App-specific (highest priority)
     "/usr/share/soundfonts",
     "/usr/local/share/soundfonts",
     "/opt/soundfonts"
@@ -87,6 +94,7 @@ initSoundFontManager :: IO SoundFontManager
 initSoundFontManager = do
     userDir <- userSoundFontDir
     return $ SoundFontManager {
+        sfmAppDir = appSoundFontDir,
         sfmSystemDir = systemSoundFontDir,
         sfmUserDir = userDir,
         sfmCurrentSoundFont = Nothing,
@@ -143,12 +151,14 @@ unloadSoundFont manager = do
 getLoadedSoundFont :: SoundFontManager -> Maybe SoundFont
 getLoadedSoundFont = sfmCurrentSoundFont
 
--- List all available soundfonts in search paths
+-- List all available soundfonts in search paths (priority order)
 listSoundFonts :: SoundFontManager -> IO [SoundFontInfo]
 listSoundFonts manager = do
-    systemSFs <- listDirSFs (sfmSystemDir manager)
+    appSFs <- listDirSFs (sfmAppDir manager)
     userSFs <- listDirSFs (sfmUserDir manager)
-    let allPaths = systemSFs ++ userSFs
+    systemSFs <- listDirSFs (sfmSystemDir manager)
+    -- Priority order: app dir first, then user, then system
+    let allPaths = appSFs ++ userSFs ++ systemSFs
     mapM pathToInfo allPaths
     where
         listDirSFs dir = do
