@@ -53,6 +53,8 @@ library
     , process
     , random
     , containers
+    , transformers
+    , explicit-exception
   pkgconfig-depends: jack >=1.9, fftw3
 
 test-suite demod-note-tests
