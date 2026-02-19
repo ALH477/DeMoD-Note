@@ -31,6 +31,12 @@ module DeMoDNote.Scale (
 data NoteName = C | Cs | D | Ds | E | F | Fs | G | Gs | A | As | B
     deriving (Eq, Show, Enum, Ord)
 
+-- Safe list indexing with default value
+safeIndex :: [a] -> Int -> a -> a
+safeIndex [] _ def = def
+safeIndex (x:_) 0 _ = x
+safeIndex (_:xs) n def = safeIndex xs (n - 1) def
+
 -- Scale intervals in semitones from root
 type ScaleIntervals = [Int]
 
@@ -206,8 +212,8 @@ transposeScale scale semitones =
 scaleInterval :: Scale -> Int -> Int
 scaleInterval scale degree = 
     let intervals = scaleIntervals scale
-        idx = (degree - 1) `mod` length intervals
-    in intervals !! idx
+        idx = (degree - 1) `mod` max 1 (length intervals)
+    in safeIndex intervals idx 0
 
 -- Common scale constructors
 majorScale :: NoteName -> Scale

@@ -38,6 +38,29 @@ import DeMoDNote.Scale (NoteName(..), noteNameToMidi, Scale(..), ScaleType(..))
 import System.Random (randomRIO)
 import Data.List (permutations)
 
+-- Safe list indexing - returns Nothing if index out of bounds
+safeIndex :: [a] -> Int -> Maybe a
+safeIndex [] _ = Nothing
+safeIndex (x:_) 0 = Just x
+safeIndex (_:xs) n = safeIndex xs (n - 1)
+
+-- Safe list indexing with default value
+safeIndexDef :: a -> [a] -> Int -> a
+safeIndexDef def xs n = case safeIndex xs n of
+    Just x -> x
+    Nothing -> def
+
+-- Safe init - returns empty list for empty input
+safeInit :: [a] -> [a]
+safeInit [] = []
+safeInit [_] = []
+safeInit xs = init xs
+
+-- Safe tail - returns empty list for empty input
+safeTail :: [a] -> [a]
+safeTail [] = []
+safeTail (_:xs) = xs
+
 -- Chord qualities
 data ChordQuality = 
     MajorTriad |
@@ -167,39 +190,39 @@ getArpeggioNotes arp startOctave =
 applyPattern :: ArpeggioPattern -> [Int] -> [Int]
 applyPattern Up notes = notes
 applyPattern Down notes = reverse notes
-applyPattern UpDown notes = notes ++ reverse (init notes)
-applyPattern DownUp notes = reverse notes ++ (if null notes then [] else tail notes)
+applyPattern UpDown notes = notes ++ reverse (safeInit notes)
+applyPattern DownUp notes = reverse notes ++ safeTail notes
 applyPattern Random notes = notes  -- Will be shuffled at play time
 applyPattern Broken3 notes = 
-    -- Pattern: 1-3-5, 3-5-1, 5-1-3, etc.
-    take 12 $ concatMap (\i -> map (notes !!) [(i `mod` len), ((i+2) `mod` len), ((i+4) `mod` len)]) [0..]
+    if null notes then []
+    else take 12 $ concatMap (\i -> map (safeIndexDef 60 notes) [(i `mod` len), ((i+2) `mod` len), ((i+4) `mod` len)]) [0..]
     where len = length notes
 applyPattern Broken4 notes = 
-    -- Pattern: 1-3-5-7, 5-7-1-3, etc.
-    take 16 $ concatMap (\i -> map (notes !!) [(i `mod` len), ((i+2) `mod` len), ((i+4) `mod` len), ((i+6) `mod` len)]) [0..]
+    if null notes then []
+    else take 16 $ concatMap (\i -> map (safeIndexDef 60 notes) [(i `mod` len), ((i+2) `mod` len), ((i+4) `mod` len), ((i+6) `mod` len)]) [0..]
     where len = length notes
 applyPattern StrumUp notes = notes
 applyPattern StrumDown notes = reverse notes
 applyPattern WalkingBass notes = 
-    -- Jazz walking bass: root, 5th, approach tone, target
-    concatMap (\root -> [root, safeHeadDef 0 (drop 2 notes), root - 1, root + 1]) (takeEvery 3 notes)
+    if null notes then []
+    else concatMap (\root -> [root, safeIndexDef 60 (drop 2 notes) 0, root - 1, root + 1]) (takeEvery 3 notes)
     where takeEvery n xs = case drop (n-1) xs of
             (y:ys) -> y : takeEvery n ys
             [] -> []
-          safeHeadDef def [] = def
-          safeHeadDef _ (x:_) = x
 applyPattern Fingerpicking notes = 
-    -- Classical guitar fingerpicking: bass, 3rd, 2nd, 1st
     let bass = case notes of
                  (b:_) -> b
-                 [] -> 60  -- Default to middle C if no notes
+                 [] -> 60
         others = drop 1 notes
     in concat $ replicate 4 $ [bass] ++ reverse others
 applyPattern (Euclidean pulses steps) notes = 
-    let pattern = euclideanPattern pulses steps
-    in map (notes !!) $ map (\i -> i `mod` length notes) $ filter (pattern !!) [0..steps-1]
+    if null notes || steps <= 0 then []
+    else let pattern = euclideanPattern pulses steps
+             validIndices = [i | i <- [0..steps-1], maybe False id (safeIndex pattern i)]
+         in map (safeIndexDef 60 notes) $ map (`mod` length notes) validIndices
 applyPattern (CustomPattern _ indices) notes = 
-    concatMap (map (notes !!)) indices
+    if null notes then []
+    else concatMap (map (safeIndexDef 60 notes)) indices
 
 -- Generate Euclidean rhythm pattern
 euclideanPattern :: Int -> Int -> [Bool]
@@ -287,9 +310,9 @@ arpeggiateChord scale degree quality =
     let intervals = case scaleType scale of
             Major -> [0, 2, 4, 5, 7, 9, 11]
             MinorNatural -> [0, 2, 3, 5, 7, 8, 10]
-            _ -> [0, 2, 4, 5, 7, 9, 11]  -- Default major
+            _ -> [0, 2, 4, 5, 7, 9, 11]
         rootIdx = (degree - 1) `mod` 7
-        rootInterval = intervals !! rootIdx
+        rootInterval = safeIndexDef 0 intervals rootIdx
         root = toEnum ((fromEnum (scaleRoot scale) + rootInterval) `mod` 12)
     in createArpeggio root quality Up
 

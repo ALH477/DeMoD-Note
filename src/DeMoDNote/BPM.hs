@@ -36,6 +36,11 @@ import Data.List (sort)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVar, writeTVar, atomically)
 
+-- Safe tail - returns empty list for empty input
+safeTail :: [a] -> [a]
+safeTail [] = []
+safeTail (_:xs) = xs
+
 -- BPM ranges
 defaultBPM :: Double
 defaultBPM = 120.0
@@ -154,7 +159,7 @@ tapBeat state = do
         -- Calculate BPM from intervals
         if length taps >= 2
             then do
-                let intervals = zipWith (-) taps (tail taps)
+                let intervals = zipWith (-) taps (safeTail taps)
                     avgInterval = fromIntegral (sum intervals) / fromIntegral (length intervals)
                     bpm = 60000000.0 / avgInterval  -- Convert to BPM
                     clampedBPM = max minBPM (min maxBPM bpm)
@@ -263,7 +268,7 @@ autoDetectBPM state onsets =
     else do
         -- Calculate intervals between consecutive onsets
         let sorted = sort onsets
-            intervals = zipWith (-) (tail sorted) sorted
+            intervals = zipWith (-) (safeTail sorted) sorted
             -- Filter out intervals that are too short or too long
             validIntervals = filter (\i -> i > 100000 && i < 2000000) intervals  -- 100ms to 2s
         if length validIntervals < 3

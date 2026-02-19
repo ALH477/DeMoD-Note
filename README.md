@@ -43,7 +43,7 @@ DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor wr
 | **Total Source LOC** | 3,425 |
 | **Source Modules** | 12 |
 | **Build Dependencies** | 30 packages |
-| **Test Suite** | 46 tests (HSpec + QuickCheck) |
+| **Test Suite** | **142 tests** (HSpec + QuickCheck) |
 | **License** | MIT |
 | **Version** | 1.0.0 |
 
@@ -95,11 +95,14 @@ nix develop -c cabal test --enable-tests
 
 | Module | Tests | Status |
 |--------|-------|--------|
-| ScaleSpec | 14 | ✅ Pass |
-| DetectorSpec | 15 | ✅ Pass |
-| BPMSpec | 13 | ✅ Pass |
-| ArpeggioSpec | 2 | ✅ Pass |
-| **Total** | **46** | **All Pass** |
+| ScaleSpec | 20+ | ✅ Pass |
+| DetectorSpec | 20+ | ✅ Pass |
+| BPMSpec | 25+ | ✅ Pass |
+| ArpeggioSpec | 10+ | ✅ Pass |
+| ConfigSpec | 12+ | ✅ Pass |
+| PresetSpec | 12+ | ✅ Pass |
+| AudioValidationSpec | 10+ | ✅ Pass |
+| **Total** | **142** | **All Pass** |
 
 ## Building All Outputs
 

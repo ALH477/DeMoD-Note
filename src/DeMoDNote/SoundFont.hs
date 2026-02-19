@@ -25,7 +25,7 @@ module DeMoDNote.SoundFont (
     reloadSoundFont
 ) where
 
-import System.Directory (doesFileExist, getHomeDirectory, listDirectory, createDirectoryIfMissing)
+import System.Directory (doesFileExist, getHomeDirectory, listDirectory, createDirectoryIfMissing, getFileSize)
 import System.FilePath ((</>), takeFileName, takeExtension)
 import System.Process (ProcessHandle, createProcess, proc, terminateProcess, getProcessExitCode, StdStream(..), spawnCommand)
 
@@ -106,11 +106,11 @@ validateSoundFont path = do
         let ext = takeExtension path
         if ext `elem` [".sf2", ".sf3", ".dls"]
         then do
-            -- TODO: Get file size and parse soundfont info
+            fileSize <- getFileSize path
             return $ Right $ SoundFont {
                 sfPath = path,
                 sfName = takeFileName path,
-                sfSize = 0,  -- Would use getFileSize
+                sfSize = fileSize,
                 sfLoaded = False,
                 sfPrograms = [0..127]
             }

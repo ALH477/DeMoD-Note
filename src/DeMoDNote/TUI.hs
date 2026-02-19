@@ -19,6 +19,17 @@ import DeMoDNote.Config
 import DeMoDNote.Preset (getPresetByName, Preset)
 import DeMoDNote.Backend (DetectionEvent(..), JackStatus(..))
 
+-- Safe list indexing with default value
+safeIndex :: [a] -> Int -> a -> a
+safeIndex [] _ def = def
+safeIndex (x:_) 0 _ = x
+safeIndex (_:xs) n def = safeIndex xs (n - 1) def
+
+-- Safe tail - returns empty list for empty input  
+safeTail :: [a] -> [a]
+safeTail [] = []
+safeTail (_:xs) = xs
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Events
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -102,7 +113,8 @@ noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
 
 midiToName :: Int -> String
 midiToName n =
-    let name   = noteNames !! (n `mod` 12)
+    let idx = n `mod` 12
+        name = safeIndex noteNames idx "C"
         octave = (n `div` 12) - 1
     in  name ++ show octave
 
@@ -123,7 +135,7 @@ sparkLine :: [Double] -> String
 sparkLine samples =
     let chars = " ▁▂▃▄▅▆▇█"
         toIdx x = min 8 (max 0 (round ((abs x) * 8.0) :: Int))
-    in  map (\x -> chars !! toIdx x) samples
+    in  map (\x -> safeIndex chars (toIdx x) ' ') samples
 
 -- Full 8-row oscilloscope block
 waveformRows :: [Double] -> Int -> [String]
@@ -507,14 +519,14 @@ cycleScale :: Int -> EventM () TUIState ()
 cycleScale dir = do
     state <- get
     let n   = (tuiScaleIndex state + dir) `mod` length availableScales
-        nm  = availableScales !! n
+        nm  = safeIndex availableScales n "Major"
     put state { tuiScaleIndex = n, tuiScaleName = nm, tuiStatusMessage = "Scale: " ++ nm }
 
 cycleArpeggio :: Int -> EventM () TUIState ()
 cycleArpeggio dir = do
     state <- get
     let n   = (tuiArpeggioIndex state + dir) `mod` length availableArpeggios
-        nm  = availableArpeggios !! n
+        nm  = safeIndex availableArpeggios n "Up"
     put state { tuiArpeggioIndex = n, tuiArpeggioName = nm, tuiStatusMessage = "Arpeggio: " ++ nm }
 
 -- Compute BPM from a list of tap timestamps (newest first).
@@ -523,7 +535,7 @@ computeBPM :: [UTCTime] -> Double
 computeBPM []  = 120.0
 computeBPM [_] = 120.0
 computeBPM ts  =
-    let pairs    = zip ts (tail ts)           -- (newer, older)
+    let pairs    = zip ts (safeTail ts)
         intervals = map (\(a, b) -> realToFrac (diffUTCTime a b) :: Double) pairs
         avg      = sum intervals / fromIntegral (length intervals)
     in  min 300.0 (max 20.0 (60.0 / avg))
