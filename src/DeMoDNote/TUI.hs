@@ -9,7 +9,7 @@ import Graphics.Vty
 import Graphics.Vty.CrossPlatform (mkVty)
 import Graphics.Vty.Config (defaultConfig)
 import Control.Concurrent (Chan, forkIO, readChan, threadDelay)
-import Control.Monad (forever, void)
+import Control.Monad (forever, void, when)
 import qualified System.Process as System.Process
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
@@ -339,12 +339,12 @@ initialTUIState cfg tip = TUIState
     , tuiScaleIndex    = 0
     , tuiArpeggioIndex = 0
     , tuiRunning       = True
-    , tuiStatusMessage = "READY  ─  JACK CONNECTED  ─  AWAITING INPUT"
+    , tuiStatusMessage = "WAITING FOR JACK..."
     , tuiTuningMode    = False
     , tuiTuningNote    = Nothing
     , tuiTuningCents   = 0.0
     , tuiTuningInTune  = False
-    , tuiJackStatus    = JackConnected
+    , tuiJackStatus    = JackDisconnected  -- Start disconnected, update when JACK connects
     }
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -590,14 +590,32 @@ paletteOption state p =
     in  withAttr atr $
         str (pfx ++ "[" ++ [paletteKey p] ++ "] " ++ paletteName p)
 
--- ── Animated "press enter" widget ────────────────────────────────────────────
--- Alternates between bright and dim on every tick, creating a slow pulse.
+-- ── JACK status indicator on startup screen ──────────────────────────────────
+
+jackStatusWidget :: TUIState -> Widget ()
+jackStatusWidget state =
+    let (statusText, statusAttr) = case tuiJackStatus state of
+            JackConnected    -> ("● JACK CONNECTED  ─  PRESS ENTER", jackGoodAttr)
+            JackDisconnected -> ("○ WAITING FOR JACK...", jackBadAttr)
+            JackReconnecting -> ("◐ RECONNECTING...", jackWarnAttr)
+            JackError msg    -> ("○ JACK ERROR: " ++ take 20 msg, jackBadAttr)
+        blinkOn = tuiTick state `mod` 2 == 0
+        atr     = if tuiJackStatus state == JackConnected 
+                  then if blinkOn then accentAttr else statusAttr
+                  else statusAttr
+    in  withAttr atr $ str statusText
 
 pressEnterWidget :: TUIState -> Widget ()
 pressEnterWidget state =
-    let blinkOn = tuiTick state `mod` 2 == 0
-        atr     = if blinkOn then accentAttr else dimAttr
-    in  withAttr atr $ str "▶   P R E S S   E N T E R   ◀"
+    let jackReady = tuiJackStatus state == JackConnected
+        blinkOn   = tuiTick state `mod` 2 == 0
+        atr       = if jackReady 
+                    then if blinkOn then accentAttr else jackGoodAttr
+                    else dimAttr
+        msg       = if jackReady 
+                    then "▶   P R E S S   E N T E R   ◀"
+                    else "      W A I T I N G   F O R   J A C K      "
+    in  withAttr atr $ str msg
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- MAIN UI
@@ -889,11 +907,13 @@ handleStartEvent (VtyEvent e) = case e of
     EvKey (KChar 'q') [] -> halt
     EvKey KEsc         [] -> halt
 
-    -- ENTER: transition to main UI
-    EvKey KEnter [] -> modify' $ \s ->
-        s { tuiMode          = MainMode
-          , tuiStatusMessage = "JACK CONNECTED  ─  AWAITING INPUT"
-          }
+    -- ENTER: transition to main UI (only when JACK is connected)
+    EvKey KEnter [] -> do
+        jackReady <- gets (tuiJackStatus)
+        when (jackReady == JackConnected) $ modify' $ \s ->
+            s { tuiMode          = MainMode
+              , tuiStatusMessage = "JACK CONNECTED  ─  AWAITING INPUT"
+              }
 
     -- 1–5: select palette (live preview — attr map is dynamic)
     EvKey (KChar c) [] | Just p <- paletteFromChar c ->
@@ -903,6 +923,11 @@ handleStartEvent (VtyEvent e) = case e of
               }
 
     _ -> return ()
+
+-- Handle detection events in StartMode to update JACK status
+handleStartEvent (AppEvent (TUIDetection det)) = modify' $ \s ->
+    s { tuiJackStatus = deJackStatus det }
+
 handleStartEvent _ = return ()
 
 handleMainEvent :: BrickEvent () TUIEvent -> EventM () TUIState ()
