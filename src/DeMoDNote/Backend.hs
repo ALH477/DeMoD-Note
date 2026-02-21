@@ -34,7 +34,7 @@ import Foreign.Marshal.Array (copyArray)
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable (sizeOf, peekElemOff)
 
-import Control.Concurrent (threadDelay, forkIO, MVar, newEmptyMVar, tryTakeMVar, tryPutMVar)
+import Control.Concurrent (threadDelay, forkIO, killThread, MVar, newEmptyMVar, tryTakeMVar, tryPutMVar, ThreadId)
 import Control.Concurrent.STM
 import Control.Exception (try, SomeException, catch, Exception)
 -- Note: DeMoDNote.Error provides typed error handling (DeMoDError).
@@ -43,10 +43,10 @@ import Control.Monad (forM, forM_, when, unless, forever)
 import Data.Int (Int16)
 import Data.IORef
 import Data.Word (Word64)
-import System.CPUTime (getCPUTime)
+import GHC.Clock (getMonotonicTimeNSec)
 import System.IO (hFlush, hPutStrLn, stderr, stdout)
 import System.Posix.Signals (installHandler, sigINT, sigTERM, Handler(..))
-import System.Process (spawnProcess, waitForProcess, readProcess)
+import System.Process (spawnProcess, readProcess)
 
 -------------------------------------------------------------------------------
 -- Logging
@@ -63,10 +63,15 @@ logErr s = hPutStrLn stderr s >> hFlush stderr
 -------------------------------------------------------------------------------
 
 data JackState = JackState
-    { jsStatus             :: !(IORef JackStatus)
-    , jsReconnectAttempts  :: !(IORef Int)
+    { jsStatus               :: !(IORef JackStatus)
+    , jsReconnectAttempts    :: !(IORef Int)
     , jsMaxReconnectAttempts :: !Int
-    , jsShouldReconnect    :: !(IORef Bool)
+    , jsShouldReconnect      :: !(IORef Bool)
+    -- | ThreadId of the currently running detector thread.
+    --   Updated by jackSession so the reconnect loop can kill the old thread
+    --   before starting a new JACK session, preventing multiple detectors
+    --   racing on the same ring buffer.
+    , jsDetectorThread       :: !(IORef (Maybe ThreadId))
     }
 
 newJackState :: Int -> IO JackState
@@ -76,6 +81,7 @@ newJackState maxAttempts =
         <*> newIORef 0
         <*> pure maxAttempts
         <*> newIORef True
+        <*> newIORef Nothing
 
 -------------------------------------------------------------------------------
 -- JackException
@@ -114,24 +120,29 @@ isJACKRunning :: IO Bool
 isJACKRunning = do
     result <- try (readProcess "jack_control" ["status"] "") :: IO (Either SomeException String)
     case result of
-        Right output -> return $ "running" `elem` words output
+        Right output ->
+            -- "running" `elem` words "not running"  →  True  (false positive!).
+            -- Check for the absence of "not" before "running" instead.
+            let ws = words output
+            in  return $ "running" `elem` ws && "not" `notElem` takeWhile (/= "running") ws
         Left _ -> do
-            result2 <- try (readProcess "pgrep" ["jackd"] "") :: IO (Either SomeException String)
-            case result2 of
-                Right _ -> return True
-                Left _ -> return False
+            -- Fall back to pgrep; a successful exit (Right) means jackd was found.
+            result2 <- try (readProcess "pgrep" ["-x", "jackd"] "") :: IO (Either SomeException String)
+            return $ case result2 of
+                Right out -> not (null (words out))
+                Left  _   -> False
 
 startJACKServer :: IO Bool
 startJACKServer = do
     putStrLn "Attempting to start JACK server..."
-    result <- try $ do
-        ph <- spawnProcess "jackd" ["-d", "dummy", "-r", "44100", "-p", "256", "-n", "2"]
-        _ <- waitForProcess ph
-        return ()
+    result <- try $ spawnProcess "jackd" ["-d", "dummy", "-r", "44100", "-p", "256", "-n", "2"]
     case result of
-        Left e  -> logErr ("Failed: " ++ show (e :: SomeException)) >> return False
+        Left e  -> logErr ("Failed to spawn jackd: " ++ show (e :: SomeException)) >> return False
         Right _ -> do
-            threadDelay 3000000
+            -- jackd is a daemon; give it 2 s to initialise before checking.
+            -- The original code called waitForProcess, which blocks until jackd
+            -- exits (potentially hours), making this function never return.
+            threadDelay 2_000_000
             ok <- isJACKRunning
             if ok then logInfo "JACK server started." >> return True
                   else logErr  "JACK server failed to start." >> return False
@@ -164,8 +175,14 @@ attemptReconnect st = do
 -- Time
 -------------------------------------------------------------------------------
 
+-- | Monotonic wall-clock time in microseconds.
+--   Previously used getCPUTime which returns CPU-time-used (not wall time)
+--   in picoseconds — wrong for timestamping real-time audio events on a
+--   multi-core machine where CPU time can be faster or slower than wall time.
 getMicroTime :: IO Word64
-getMicroTime = fromIntegral . (`div` 1000000) <$> getCPUTime
+getMicroTime = do
+    t <- getMonotonicTimeNSec
+    return $! t `div` 1000
 
 -------------------------------------------------------------------------------
 -- Audio Ring Buffer
@@ -183,31 +200,34 @@ newAudioRingBuffer size = do
     wp <- newIORef 0
     return $ AudioRingBuffer mvec wp size
 
+-- | Write n CFloat samples from @ptr@ into the ring buffer starting at @wp@,
+--   wrapping around correctly.  Previously only the first chunk (up to the end
+--   of the buffer) was written; samples past the wrap point were silently lost.
 writeFloat2Int16Frame :: VSM.IOVector Int16 -> Int -> Int -> Ptr CFloat -> Int -> IO Int
 writeFloat2Int16Frame mvec wp size ptr n = do
     let remaining = size - wp
-        toWrite = min n remaining
-    forM_ [0..toWrite-1] $ \i -> do
+        chunk1    = min n remaining          -- samples before the wrap
+        chunk2    = n - chunk1               -- samples after the wrap (0 if no wrap)
+    -- First chunk: wp .. wp+chunk1-1
+    forM_ [0..chunk1-1] $ \i -> do
         val <- peekElemOff ptr i :: IO CFloat
-        let intVal = cfloatToInt16 val
-        VSM.write mvec (wp + i) intVal
-    let newWp = wp + toWrite
-    return newWp
+        VSM.write mvec (wp + i) (cfloatToInt16 val)
+    -- Second chunk: 0 .. chunk2-1  (only when n > remaining)
+    forM_ [0..chunk2-1] $ \i -> do
+        val <- peekElemOff ptr (chunk1 + i) :: IO CFloat
+        VSM.write mvec i (cfloatToInt16 val)
+    return $ (wp + n) `mod` size
 
 -- Write audio samples from JACK callback to ring buffer and signal detector thread
 writeToRingBuffer :: AudioState -> Ptr CFloat -> Int -> IO ()
 writeToRingBuffer audioState buf n = do
-    let rb = audioRingBuffer audioState
+    let rb   = audioRingBuffer audioState
         mvec = rbMVec rb
         size = rbSize rb
-    
-    wp <- readIORef (rbWritePos rb)
+    wp    <- readIORef (rbWritePos rb)
     newWp <- writeFloat2Int16Frame mvec wp size buf n
-    
-    -- Update write position
-    writeIORef (rbWritePos rb) (newWp `mod` size)
-    
-    -- Signal detector thread that new data is available
+    -- writeFloat2Int16Frame already returns (wp + n) `mod` size.
+    writeIORef (rbWritePos rb) newWp
     _ <- tryPutMVar (rbSemaphore audioState) ()
     return ()
 
@@ -262,14 +282,21 @@ jackProcessCallback
 jackProcessCallback audioState inPort outPort nframes = Trans.lift go
   where
     go = do
-        let JACK.NFrames w = nframes          -- unwrap newtype (Word32)
+        let JACK.NFrames w = nframes
             n = fromIntegral w :: Int
-        
-        inPtr <- JAudio.getBufferPtr inPort nframes
-        writeToRingBuffer audioState (castPtr inPtr) n
-        
-        outPtr <- JAudio.getBufferPtr outPort nframes
-        copyArray outPtr (castPtr inPtr) (n * sizeOf (undefined :: CFloat))
+
+        -- A zero-frame callback is JACK's xrun notification.
+        if n == 0
+          then modifyIORef' (xrunCount audioState) (+1)
+          else do
+            inPtr <- JAudio.getBufferPtr inPort nframes
+            writeToRingBuffer audioState (castPtr inPtr) n
+
+            outPtr <- JAudio.getBufferPtr outPort nframes
+            -- copyArray takes an *element* count, not a byte count.
+            -- The original (n * sizeOf CFloat) was copying 4× too many elements,
+            -- overwriting memory beyond the end of the output buffer.
+            copyArray outPtr inPtr n
         
         return ()
 
@@ -299,8 +326,18 @@ jackSession
 jackSession cfg audioState jackState stateVar = do
     logInfo "Starting JACK client..."
 
-    -- Detector thread lives for the lifetime of this JACK session
-    _ <- forkIO $ detectorThread cfg audioState jackState stateVar
+    -- Kill any detector thread left over from a previous session.
+    -- Without this, every reconnect spawns an additional detector; after N
+    -- reconnects there are N detectors all reading the same ring buffer.
+    mOld <- readIORef (jsDetectorThread jackState)
+    case mOld of
+        Just tid -> do
+            killThread tid
+            logInfo "Stopped previous detector thread."
+        Nothing  -> return ()
+
+    tid <- forkIO $ detectorThread cfg audioState jackState stateVar
+    writeIORef (jsDetectorThread jackState) (Just tid)
 
     JACK.handleExceptions $
         JACK.withClientDefault "DeMoDNote" $ \client ->
@@ -308,16 +345,16 @@ jackSession cfg audioState jackState stateVar = do
                 JACK.withPort client "output" $ \outPort ->
                     JACK.withProcess client (jackProcessCallback audioState inPort outPort) $
                         JACK.withActivation client $ do
-                            -- All IO actions lifted into ExceptionalT context
                             sr <- Trans.lift $ JACK.getSampleRate client
                             bs <- Trans.lift $ JACK.getBufferSize client
-                            
+
                             Trans.lift $ atomically $ writeTVar (sampleRate audioState) sr
                             Trans.lift $ atomically $ writeTVar (bufferSize audioState) bs
                             Trans.lift $ writeIORef (jsStatus jackState) JackConnected
-                            
-                            Trans.lift $ logInfo $ "✅ JACK connected (SR=" ++ show sr ++ ", BS=" ++ show bs ++ ")"
-                            
+
+                            Trans.lift $ logInfo $
+                                "✅ JACK connected (SR=" ++ show sr ++ ", BS=" ++ show bs ++ ")"
+
                             Trans.lift $ jackControlLoop audioState
 
     logInfo "JACK session ended cleanly"
@@ -347,22 +384,20 @@ detectorThread cfg audioState jackState stateVar = do
     logInfo "Detector thread started."
     loop (0 :: Int)
   where
-    rb = audioRingBuffer audioState
-    
     loop !silentTicks = do
         isRunning <- atomically $ readTVar (running audioState)
-        unless isRunning $ do
+        if not isRunning
+          then do
             sendFinalNoteOff audioState
             logInfo "Detector thread stopping."
-            return ()
-        
-        when isRunning $ do
+          else do
             mReady <- tryTakeMVar (rbSemaphore audioState)
             case mReady of
                 Nothing -> do
                     threadDelay 10000
                     xruns <- readIORef (xrunCount audioState)
-                    when (silentTicks > 200) $ do
+                    -- Log once when the threshold is first crossed, not every tick.
+                    when (silentTicks == 200) $
                         logErr $ "[Detector] No JACK frames for ~2s (xruns=" ++ show xruns ++ ")"
                     loop (silentTicks + 1)
                 Just () -> do
@@ -383,89 +418,99 @@ sendFinalNoteOff audioState = do
 processFrame :: Config -> AudioState -> JackState -> TVar ReactorState -> IO ()
 processFrame cfg audioState jackState stateVar = do
     let rb = audioRingBuffer audioState
-    wp <- readIORef (rbWritePos rb)
+    wp   <- readIORef (rbWritePos rb)
     let size = rbSize rb
-    
-    -- Read last 256 samples directly into immutable vector (avoids intermediate allocation)
+
+    -- Read last 256 samples from the ring buffer.
     let startPos = if wp >= 256 then wp - 256 else size - (256 - wp)
-    samplesVec <- VS.generateM 256 $ \i -> VSM.read (rbMVec rb) ((startPos + i) `mod` size)
+    samplesVec <- VS.generateM 256 $ \i ->
+        VSM.read (rbMVec rb) ((startPos + i) `mod` size)
     let samplesInt = VS.map fromIntegral samplesVec :: VS.Vector Int
-    
+
     when (VS.length samplesVec >= 128) $ do
         currentTime <- getMicroTime
-        
-        -- Normalize for waveform display
+
         let !samplesD = VS.map (\x -> fromIntegral x / 32768.0 :: Double) samplesVec
             !waveform = VS.toList samplesD
-        
-        result <- detect cfg samplesInt currentTime Idle defaultPLLState defaultOnsetFeatures
-        
+
+        -- Read previous reactor state so detection is stateful across frames.
+        -- Previously Idle/defaultPLLState/defaultOnsetFeatures were hard-coded,
+        -- meaning the note state-machine could never progress past its first frame.
+        prevRS <- atomically $ readTVar stateVar
+        let prevNoteState    = noteStateMach  prevRS
+            prevPLL          = pllStateMach   prevRS
+            prevOnset        = onsetFeatures  prevRS
+
+        result <- detect cfg samplesInt currentTime prevNoteState prevPLL prevOnset
+
         let (detTuningNote, detTuningCents) = case detectedNote result of
                 Nothing        -> (Nothing, 0.0)
                 Just (note, _) ->
                     let (nearest, cents) = nearestNote (midiToFreq note)
                     in  (Just nearest, cents)
             detTuningInTune = isInTune detTuningCents
-        
-        atomically $ writeTVar (lastConfidence audioState) (confidence result)
-        atomically $ writeTVar (lastLatency audioState) 2.66
-        atomically $ writeTVar (lastWaveform audioState) waveform
-        
-        handleNoteChange audioState (detectedNote result) (noteState result) detTuningNote detTuningCents detTuningInTune
-        
-        -- Get current JACK status from the IORef
+
+        -- Compute actual latency from JACK buffer size and sample rate.
+        -- Previously hardcoded to 2.66 ms regardless of config.
+        sr  <- atomically $ readTVar (sampleRate audioState)
+        bs  <- atomically $ readTVar (bufferSize audioState)
+        let !actualLatency = if sr > 0
+                             then fromIntegral bs / fromIntegral sr * 1000.0
+                             else 2.66 :: Double
+
+        -- Update all TVars in a single transaction so readers never observe
+        -- a half-updated state (previously three separate atomically calls).
         jackSt <- readIORef (jsStatus jackState)
-        
-        let newReactorState = ReactorState
-              { currentNotes = case detectedNote result of
-                  Nothing -> []
-                  Just n -> [n]
-              , noteStateMach = noteState result
-              , pllStateMach = defaultPLLState
-              , onsetFeatures = defaultOnsetFeatures
-              , lastOnsetTime = currentTime
-              , config = cfg
-              , reactorBPM = 120.0
-              , reactorThreshold = -40.0
-              -- New fields for TUI integration
-              , jackStatus = jackSt
+        let newRS = ReactorState
+              { currentNotes        = maybe [] (:[]) (detectedNote result)
+              , noteStateMach       = noteState result
+              , pllStateMach        = pllState  result   -- persist PLL state
+              , onsetFeatures       = onsetFeat result   -- persist onset features
+              , lastOnsetTime       = currentTime
+              , config              = cfg
+              , reactorBPM          = prevRS `seq` reactorBPM prevRS -- preserve tap BPM
+              , reactorThreshold    = reactorThreshold prevRS
+              , jackStatus          = jackSt
               , detectionConfidence = confidence result
-              , detectionLatency = 2.66
-              , latestWaveform = waveform
-              , detectedTuningNote = detTuningNote
+              , detectionLatency    = actualLatency
+              , latestWaveform      = waveform
+              , detectedTuningNote  = detTuningNote
               , detectedTuningCents = detTuningCents
               , detectedTuningInTune = detTuningInTune
               }
-        atomically $ writeTVar stateVar newReactorState
+        atomically $ do
+            writeTVar (lastConfidence audioState) (confidence result)
+            writeTVar (lastLatency    audioState) actualLatency
+            writeTVar (lastWaveform   audioState) waveform
+            writeTVar stateVar newRS
+
+        handleNoteChange audioState (detectedNote result) (noteState result)
+                         detTuningNote detTuningCents detTuningInTune
 
 handleNoteChange :: AudioState -> Maybe (MIDINote, Velocity) -> NoteState -> Maybe Int -> Double -> Bool -> IO ()
 handleNoteChange audioState mNote noteState detTuningNote detTuningCents detTuningInTune = do
-    curr <- atomically $ readTVar (currentNote audioState)
+    curr    <- atomically $ readTVar (currentNote audioState)
+    mClient <- atomically $ readTVar (oscClient   audioState)   -- read once
+    let sendOn  n v = case mClient of
+            Just c  -> sendNoteOn  c n v `catch` (\(_ :: SomeException) -> return ())
+            Nothing -> return ()
+        sendOff n   = case mClient of
+            Just c  -> sendNoteOff c n   `catch` (\(_ :: SomeException) -> return ())
+            Nothing -> return ()
     case (curr, mNote) of
         (Nothing, Just (note, vel)) -> do
             logInfo $ "Note On: " ++ show note
-            mClient <- atomically $ readTVar (oscClient audioState)
-            case mClient of
-                Just client -> sendNoteOn client note vel `catch` (\(_ :: SomeException) -> return ())
-                Nothing -> return ()
+            sendOn note vel
             atomically $ writeTVar (currentNote audioState) $ Just (note, vel)
         (Just (note, _), Nothing) -> do
             logInfo $ "Note Off: " ++ show note
-            mClient <- atomically $ readTVar (oscClient audioState)
-            case mClient of
-                Just client -> sendNoteOff client note `catch` (\(_ :: SomeException) -> return ())
-                Nothing -> return ()
+            sendOff note
             atomically $ writeTVar (currentNote audioState) Nothing
         (Just (oldNote, _), Just (newNote, vel)) | newNote /= oldNote -> do
             logInfo $ "Note Off: " ++ show oldNote
-            mClient <- atomically $ readTVar (oscClient audioState)
-            case mClient of
-                Just client -> sendNoteOff client oldNote `catch` (\(_ :: SomeException) -> return ())
-                Nothing -> return ()
+            sendOff oldNote
             logInfo $ "Note On: " ++ show newNote
-            case mClient of
-                Just client -> sendNoteOn client newNote vel `catch` (\(_ :: SomeException) -> return ())
-                Nothing -> return ()
+            sendOn newNote vel
             atomically $ writeTVar (currentNote audioState) $ Just (newNote, vel)
         _ -> return ()
 
@@ -530,4 +575,7 @@ runBackendSimple _cfg _state = do
     logInfo "Use: jackd -d dummy -r 44100 -p 256"
     logInfo "Then connect: jack_connect system:capture_1 DeMoDNote:input"
     logInfo "         jack_connect DeMoDNote:output system:playback_1"
-    logInfo "DeMoDNote stopped."
+    -- Block the calling thread so the process stays alive.
+    -- Previously returned immediately, which would cause callers that expect
+    -- a blocking call (e.g. the main thread) to exit.
+    forever $ threadDelay 1_000_000

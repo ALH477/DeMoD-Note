@@ -327,11 +327,11 @@ findFont fontName = do
 -- | Load fonts with fallback to system search
 loadFonts :: NVG.Context -> String -> String -> IO ()
 loadFonts ctx regularFont boldFont = do
-  -- Try to find fonts in system paths
-  mbRegPath <- if "/" `elem` regularFont
+  -- '/' elem check: String is [Char], so we test for the Char '/', not the String "/".
+  mbRegPath <- if '/' `elem` regularFont
                 then pure (Just regularFont)  -- Absolute path
                 else findFont regularFont
-  mbBoldPath <- if "/" `elem` boldFont
+  mbBoldPath <- if '/' `elem` boldFont
                  then pure (Just boldFont)
                  else findFont boldFont
   
@@ -375,19 +375,25 @@ data GLNote = GLNote
   , glnChannel  :: !Int
   } deriving (Show)
 
--- Convert from ReactorState to GLRenderState
+-- | Convert from ReactorState to GLRenderState.
+-- Previously glrsAmplitude was hardcoded to 0.5 and glrsConfidence to 0.8.
 fromReactorState :: ReactorState -> GLRenderState
 fromReactorState rs = GLRenderState
-  { glrsTime         = fromIntegral (lastOnsetTime rs) / 1e6  -- Convert microseconds to seconds
-  , glrsAmplitude    = 0.5  -- Default amplitude
+  { glrsTime         = fromIntegral (lastOnsetTime rs) / 1e6  -- μs → seconds
+  , glrsAmplitude    = rmsAmplitude (latestWaveform rs)
   , glrsCurrentNote  = case currentNotes rs of
       []    -> Nothing
       (n:_) -> Just n
   , glrsNoteHistory  = take 20 (currentNotes rs)
-  , glrsConfidence   = 0.8  -- Default confidence
-  , glrsWaveform     = []   -- Would need audio buffer access
+  , glrsConfidence   = detectionConfidence rs
+  , glrsWaveform     = latestWaveform rs
   , glrsBPM          = reactorBPM rs
   }
+  where
+    -- RMS amplitude: √(mean of squares), clamped to [0,1].
+    rmsAmplitude [] = 0.0
+    rmsAmplitude xs = realToFrac . min 1.0 . sqrt $
+        sum (map (\x -> x * x) xs) / fromIntegral (length xs)
 
 -- =============================================================================
 -- Shaders
@@ -522,36 +528,52 @@ extractNotes log mf selectedTracks = do
 computeNotes :: Double -> [ZM.MidiTrack] -> [GLNote]
 computeNotes division tracks = reverse finalNotes'
   where
-    trackEvents = concatMap (\track -> scanl' (\(cum, _) (dt, ev) -> let newCum = cum + fromIntegral dt in (newCum, ev)) 0 (ZM.getTrackMessages track)) tracks
-    allEvents = sortBy (comparing fst) trackEvents
+    -- Compute absolute tick timestamps for each event per track, then merge.
+    -- Previously used scanl' with initial value `0`, which cannot unify with
+    -- the accumulator type `(Double, MidiEvent)` — a type error.  We now
+    -- compute cumulative ticks as a separate Integer scanl and zip with events.
+    absEvents track =
+      let msgs     = ZM.getTrackMessages track
+          cumTicks = tail $ scanl' (\cum (dt, _) -> cum + fromIntegral dt) (0 :: Integer) msgs
+      in  zipWith (\t (_, ev) -> (t, ev)) cumTicks msgs
+
+    trackEvents = concatMap absEvents tracks
+    allEvents   = sortBy (comparing fst) trackEvents
 
     initialState :: (Double, Integer, Double, Map.Map (Int, Int) (Double, Int), [GLNote])
     initialState = (0.0, 0, 500000.0, Map.empty, [])
 
-    process (curTime, lastTick, usPQ, opens, notes) (tick, ev) = case ev of
-      ZM.MidiMetaEvent (ZM.SetTempo uspq) -> (curTime + dTime, tick, fromIntegral uspq, opens, notes)
-        where dTime = fromIntegral (tick - lastTick) * usPQ / 1e6 / division
-      ZM.MidiVoiceEvent (ZM.NoteOn chan pitch vel) | vel > 0 -> 
-        (curTime + dTime, tick, usPQ, Map.insert (fromIntegral chan, fromIntegral pitch) (curTime + dTime, fromIntegral vel) opens, notes)
-        where dTime = fromIntegral (tick - lastTick) * usPQ / 1e6 / division
-      ZM.MidiVoiceEvent (ZM.NoteOn chan pitch 0) -> 
-        let (newOpens, newNotes) = closeNote (curTime + dTime) (fromIntegral chan) (fromIntegral pitch) opens notes
-        in (curTime + dTime, tick, usPQ, newOpens, newNotes)
-        where dTime = fromIntegral (tick - lastTick) * usPQ / 1e6 / division
-      ZM.MidiVoiceEvent (ZM.NoteOff chan pitch _) -> 
-        let (newOpens, newNotes) = closeNote (curTime + dTime) (fromIntegral chan) (fromIntegral pitch) opens notes
-        in (curTime + dTime, tick, usPQ, newOpens, newNotes)
-        where dTime = fromIntegral (tick - lastTick) * usPQ / 1e6 / division
-      _ -> (curTime + dTime, tick, usPQ, opens, notes)
-        where dTime = fromIntegral (tick - lastTick) * usPQ / 1e6 / division
+    process (curTime, lastTick, usPQ, opens, notes) (tick, ev) =
+      let dTime = fromIntegral (tick - lastTick) * usPQ / 1e6 / division
+          t'    = curTime + dTime
+      in case ev of
+        ZM.MidiMetaEvent (ZM.SetTempo uspq) ->
+          (t', tick, fromIntegral uspq, opens, notes)
+        ZM.MidiVoiceEvent (ZM.NoteOn chan pitch vel) | vel > 0 ->
+          (t', tick, usPQ,
+           Map.insert (fromIntegral chan, fromIntegral pitch) (t', fromIntegral vel) opens,
+           notes)
+        ZM.MidiVoiceEvent (ZM.NoteOn chan pitch 0) ->
+          let (o', ns') = closeNote t' (fromIntegral chan) (fromIntegral pitch) opens notes
+          in  (t', tick, usPQ, o', ns')
+        ZM.MidiVoiceEvent (ZM.NoteOff chan pitch _) ->
+          let (o', ns') = closeNote t' (fromIntegral chan) (fromIntegral pitch) opens notes
+          in  (t', tick, usPQ, o', ns')
+        _ -> (t', tick, usPQ, opens, notes)
 
     closeNote time chan pitch opens notes = case Map.lookup (chan, pitch) opens of
-      Nothing -> (opens, notes)
-      Just (start, vel) -> (Map.delete (chan, pitch) opens, GLNote start (time - start) pitch vel chan : notes)
+      Nothing         -> (opens, notes)
+      Just (start, v) ->
+        ( Map.delete (chan, pitch) opens
+        , GLNote start (time - start) pitch v chan : notes
+        )
 
-    ( _, _, _, finalOpens, finalNotes) = foldl' process initialState allEvents
+    (_, _, _, finalOpens, finalNotes) = foldl' process initialState allEvents
 
-    finalNotes' = foldl' (\ns ((c,p), (s,v)) -> GLNote s 0 p v c : ns) finalNotes (Map.toList finalOpens)
+    -- Close any still-open notes at end-of-file with zero duration.
+    finalNotes' = foldl' (\ns ((c,p),(s,v)) -> GLNote s 0 p v c : ns)
+                         finalNotes
+                         (Map.toList finalOpens)
 
 -- =============================================================================
 -- OBJ Model Loading
@@ -575,9 +597,10 @@ loadOBJ path = do
       if null verts
         then pure $ Left $ "OBJ file contains no vertices: " ++ path
         else do
-          let vertices = concat verts
-              normals = concat norms
-              indices = concatMap expandFace faces
+          -- verts/norms were prepended during fold, so reverse to restore file order.
+          let vertices = concatMap reverse (reverse verts)
+              normals  = concatMap reverse (reverse norms)
+              indices  = concatMap expandFace faces
           pure $ Right $ Model vertices normals indices
   where
     parseLine (vs, ns, fs) line 
@@ -814,17 +837,19 @@ getUniformLoc prog name = withCString name $ glGetUniformLocation prog
 compileShader :: GLenum -> BS.ByteString -> IO GLuint
 compileShader shaderType src = do
   shader <- glCreateShader shaderType
-  BS.useAsCStringLen src $ \(cstr, len) ->
+  -- Pass nullPtr for lengths: OpenGL then relies on null-termination.
+  -- The previous code misinterpreted the byte-count as a pointer address (UB).
+  BS.useAsCString src $ \cstr ->
     withArray [cstr] $ \ptr ->
-      glShaderSource shader 1 ptr (castPtr $ ptrToWordPtr $ fromIntegral len)
+      glShaderSource shader 1 ptr nullPtr
   glCompileShader shader
 
   status <- alloca $ \p -> glGetShaderiv shader GL_COMPILE_STATUS p >> peek p
   when (status == GL_FALSE) $ do
-    log <- allocaArray 1024 $ \buf -> do
+    errLog <- allocaArray 1024 $ \buf -> do
       glGetShaderInfoLog shader 1024 nullPtr buf
       peekCString buf
-    putStrLn $ "Shader compilation FAILED:\n" ++ log
+    putStrLn $ "Shader compilation FAILED:\n" ++ errLog
 
   pure shader
 
@@ -1426,6 +1451,7 @@ renderFrame AppState{..} = do
               glBufferSubData GL_ARRAY_BUFFER 0 (fromIntegral $ length vertices * sizeOf (0 :: GLfloat)) (castPtr ptr)
 
             glBindVertexArray asNoteVAO
+            -- Each vertex = [x, y, r, g, b] = 5 floats; divide accordingly.
             glDrawArrays GL_TRIANGLES 0 (fromIntegral $ length vertices `div` 5)
             glBindVertexArray 0
 
@@ -1503,30 +1529,47 @@ renderFrame AppState{..} = do
 
   GLFW.swapBuffers asWindow
 
--- Render the currently detected note from backend
+-- | Render the currently detected note (or a listening indicator) from backend state.
 renderDetectedNote :: GLRenderState -> NVG.Context -> Int -> Int -> IO ()
-renderDetectedNote state ctx resW resH = 
+renderDetectedNote state ctx resW resH = do
+  let cx = fromIntegral resW / 2
+      cy = fromIntegral resH / 2
   case glrsCurrentNote state of
-    Nothing -> pure ()
+    Nothing -> do
+      -- Show a subtle "listening" indicator when no note is active.
+      let conf  = glrsConfidence state
+          alpha = floor (min 1.0 (realToFrac conf) * 180) :: Word8
+      NVG.fontSize ctx 18.0
+      NVG.fontFace ctx "regular"
+      NVG.fillColor ctx (NVG.rgba 120 120 120 alpha)
+      NVG.textAlign ctx (NVG.ALIGN_CENTER .|. NVG.ALIGN_MIDDLE)
+      NVG.text ctx cx cy (BS8.pack "· · ·")
     Just (note, vel) -> do
-      let noteName = noteNames !! (note `mod` 12)
-          octave = note `div` 12 - 1
-          text = noteName ++ show octave
-          velBar = replicate (vel `div` 10) '█' ++ replicate (12 - vel `div` 10) '░'
+      let noteName = noteNamesGL !! (note `mod` 12)
+          octave   = note `div` 12 - 1
+          text     = noteName ++ show octave
+          velBar   = replicate (vel `div` 10) '█' ++ replicate (12 - vel `div` 10) '░'
+          -- Color by confidence: green (high) → yellow (mid) → red (low)
+          conf     = realToFrac (glrsConfidence state) :: Float
+          (nr,ng,nb) | conf >= 0.75 = (0,   255, 128)
+                     | conf >= 0.40 = (255, 200, 0  )
+                     | otherwise    = (255, 60,  60 )
       NVG.fontSize ctx 48.0
       NVG.fontFace ctx "bold"
-      NVG.fillColor ctx (NVG.rgba 0 255 128 255)
+      NVG.fillColor ctx (NVG.rgba nr ng nb 255)
       NVG.textAlign ctx (NVG.ALIGN_CENTER .|. NVG.ALIGN_MIDDLE)
-      NVG.text ctx (fromIntegral resW / 2) (fromIntegral resH / 2) (BS8.pack text)
+      NVG.text ctx cx cy (BS8.pack text)
       NVG.fontSize ctx 24.0
-      NVG.text ctx (fromIntegral resW / 2) (fromIntegral resH / 2 + 40) (BS8.pack $ "vel: " ++ velBar)
-      -- BPM display
+      NVG.fillColor ctx (NVG.rgba nr ng nb 200)
+      NVG.text ctx cx (cy + 40) (BS8.pack $ "vel: " ++ velBar)
+      -- BPM in top-right
       NVG.fontSize ctx 18.0
       NVG.fillColor ctx (NVG.rgba 255 255 255 200)
       NVG.textAlign ctx (NVG.ALIGN_RIGHT .|. NVG.ALIGN_TOP)
-      NVG.text ctx (fromIntegral resW - 20) 20 (BS8.pack $ "BPM: " ++ show (round (glrsBPM state) :: Int))
+      NVG.text ctx (fromIntegral resW - 20) 20
+               (BS8.pack $ "BPM: " ++ show (round (glrsBPM state) :: Int))
   where
-    noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+    noteNamesGL = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
 
 -- =============================================================================
 -- Main Loop
@@ -1539,16 +1582,18 @@ mainLoop st@AppState{..} = do
   unless (shouldClose || not running) $ do
     renderFrame st
 
-    now <- GLFW.getTime
+    now  <- GLFW.getTime
     last <- readIORef asLastTime
     let dt = now - last
+    -- Always advance the timer so per-frame dt is accurate.
+    writeIORef asLastTime now
     modifyIORef' asFrameCount (+1)
 
+    -- Print FPS at most once per second (accumulate over ~0.25 s windows).
     when (dt > 0.25) $ do
       frames <- readIORef asFrameCount
       let fps = fromIntegral frames / dt :: Double
       modifyIORef' asFrameCount (const 0)
-      writeIORef asLastTime now
 
       lastPrint <- readIORef asLastFPSPrint
       nowWall <- getCurrentTime
@@ -1559,7 +1604,7 @@ mainLoop st@AppState{..} = do
     mainLoop st
 
   -- Cleanup on exit
-  when shouldClose $ do
+  when shouldClose $
     asLogger "Shutting down OpenGL..."
 
 -- =============================================================================

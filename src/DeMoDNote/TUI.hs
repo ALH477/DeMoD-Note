@@ -1119,7 +1119,12 @@ handleMainEvent (VtyEvent e) = case e of
 
     EvKey (KChar 'r') [] -> modify' $ \s ->
         setStatus "TAP TEMPO RESET  ─  120 BPM"
-            (s { tuiTapTimes = [], tuiBPM = 120.0, tuiPeakVelocity = 0 })
+            (s { tuiTapTimes    = []
+               , tuiBPM         = 120.0
+               , tuiPeakVelocity = 0
+               , tuiLastNote    = Nothing   -- clear stale hero panel
+               , tuiNoteHistory = []        -- clear note trail
+               })
 
     EvKey (KChar 't') [] -> modify' $ \s ->
         let m = not (tuiTuningMode s)
@@ -1250,15 +1255,20 @@ pressEscapeWidget state =
 
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- | Haskell's built-in `mod` returns negative values when the dividend is
+-- negative (e.g. (0 + (-1)) `mod` 11 = -1, not 10).  Use this instead.
+posMod :: Int -> Int -> Int
+posMod x n = ((x `mod` n) + n) `mod` n
+
 cycleScale :: Int -> EventM () TUIState ()
 cycleScale dir = modify' $ \s ->
-    let n = (tuiScaleIndex s + dir) `mod` length availableScales
+    let n = (tuiScaleIndex s + dir) `posMod` length availableScales
     in  setStatus ("SCALE  ─  " ++ safeIndex availableScales n "?")
             (s { tuiScaleIndex = n })
 
 cycleArpeggio :: Int -> EventM () TUIState ()
 cycleArpeggio dir = modify' $ \s ->
-    let n = (tuiArpeggioIndex s + dir) `mod` length availableArpeggios
+    let n = (tuiArpeggioIndex s + dir) `posMod` length availableArpeggios
     in  setStatus ("ARPEGGIO  ─  " ++ safeIndex availableArpeggios n "?")
             (s { tuiArpeggioIndex = n })
 
@@ -1266,8 +1276,10 @@ computeBPM :: [UTCTime] -> Double
 computeBPM []  = 120.0
 computeBPM [_] = 120.0
 computeBPM ts  =
+    -- ts is newest-first; pairs are (newer, older).
+    -- diffUTCTime newer older is positive, giving the inter-tap interval.
     let pairs     = zip ts (safeTail ts)
-        intervals = map (\(a, b) -> realToFrac (diffUTCTime a b) :: Double) pairs
+        intervals = map (\(newer, older) -> realToFrac (diffUTCTime newer older) :: Double) pairs
         avg       = sum intervals / fromIntegral (length intervals)
     in  clamp 20.0 300.0 (60.0 / avg)
 
@@ -1277,13 +1289,13 @@ tapQualityRing :: [UTCTime] -> String
 tapQualityRing ts
     | length ts < 4 = replicate 4 '○'   -- need 4 taps for meaningful variance
     | otherwise =
-        let pairs     = zip ts (safeTail ts)
-            ivs       = map (\(a,b) -> abs (realToFrac (diffUTCTime a b) :: Double)) pairs
-            mean      = sum ivs / fromIntegral (length ivs)
-            variance  = sum (map (\x -> (x - mean)^(2::Int)) ivs) / fromIntegral (length ivs)
-            stddev    = sqrt variance
-            -- stddev < 10ms → 4 solid; < 30ms → 3; < 60ms → 2; else 1
-            filled    = clamp 1 4 $ if stddev < 0.010 then 4
+        -- ts is newest-first; (newer, older) pairs give positive intervals.
+        let pairs    = zip ts (safeTail ts)
+            ivs      = map (\(newer, older) -> realToFrac (diffUTCTime newer older) :: Double) pairs
+            mean     = sum ivs / fromIntegral (length ivs)
+            variance = sum (map (\x -> (x - mean)^(2::Int)) ivs) / fromIntegral (length ivs)
+            stddev   = sqrt variance
+            filled   = clamp 1 4 $ if stddev < 0.010 then 4
                                     else if stddev < 0.030 then 3
                                     else if stddev < 0.060 then 2
                                     else 1
@@ -1361,7 +1373,9 @@ initTUICommon cfg = do
         initSt = initialTUIState cfg tip
     bc <- newBChan bChanCapacity
     -- Animation tick: drives logo shimmer and waiting-glyph pulse.
-    supervisedForkIO $ do
+    -- The inner `forever` keeps the delay+write loop running; the outer
+    -- `supervisedForkIO` restarts the whole thread if it crashes.
+    supervisedForkIO $ forever $ do
         threadDelay tickIntervalUs
         writeBChan bc TUITick
     return (initSt, bc)
@@ -1376,9 +1390,9 @@ runTUIWithState :: Config -> TVar ReactorState -> IO ()
 runTUIWithState cfg stateVar = do
     (initSt, bc) <- initTUICommon cfg
     prevRef <- newIORef Nothing
-    -- Change-gated poll.  Key covers every field the TUI renders so that
-    -- a JACK drop, waveform burst, or tuning change all reach the UI.
-    supervisedForkIO $ do
+    -- Change-gated poll at 100 Hz.  The `forever` ensures continuous polling;
+    -- without it the previous code polled exactly once.
+    supervisedForkIO $ forever $ do
         threadDelay 10_000  -- 100 Hz
         rs <- atomically $ readTVar stateVar
         prev <- readIORef prevRef
@@ -1387,7 +1401,7 @@ runTUIWithState cfg stateVar = do
                     , noteStateMach       rs
                     , jackStatus          rs
                     , detectionConfidence rs
-                    , take 8 (latestWaveform rs)  -- sample for change detection
+                    , take 8 (latestWaveform rs)
                     )
         when (prev /= Just key) $ do
             writeIORef prevRef (Just key)
@@ -1414,7 +1428,7 @@ runTUIWithChannel cfg mChan = do
     (initSt, bc) <- initTUICommon cfg
     case mChan of
         Nothing   -> return ()
-        Just chan -> supervisedForkIO $ do
+        Just chan -> supervisedForkIO $ forever $ do
             ev <- readChan chan
             writeBChan bc (TUIDetection ev)
     let buildVty = mkVty defaultConfig
