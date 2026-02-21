@@ -53,15 +53,16 @@ import Foreign
 import Foreign.C.String (withCString)
 import Control.Monad (when, unless, forever, forM_, void)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO, atomically, writeTVar)
-import Control.Concurrent (forkOS, ThreadId, threadDelay)
+import Control.Concurrent (forkIO, forkOS, threadDelay, ThreadId)
 import Data.IORef
-import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime)
+import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime, utctDayTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.LocalTime (timeToTimeOfDay, TimeOfDay(..))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import System.Exit (exitSuccess, exitFailure)
 import System.FilePath ((</>))
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, getHomeDirectory)
 import Text.Printf (printf)
 import qualified ZMidi.Core as ZM
 import Data.List (sortBy, foldl')
@@ -70,6 +71,7 @@ import qualified Data.Map.Strict as Map
 import Data.Word (Word8, Word16)
 import Data.Char (isSpace)
 import Data.Maybe (isJust, fromMaybe)
+import Data.Bits ((.&.))
 import qualified DearImGui as ImGui
 import qualified DearImGui.GLFW as ImGuiGLFW
 import qualified DearImGui.OpenGL3 as ImGuiGL3
@@ -77,13 +79,176 @@ import qualified NanoVG as NVG
 import qualified Graphics.Vty as VTY
 import qualified Text.SVG.Tree as SVGTree
 import qualified Text.SVG.Types as SVG
+import System.Process (createProcess, proc, std_out, std_err, StdStream(..), ProcessHandle, terminateProcess, waitForProcess)
+import Control.Exception (SomeException, try)
 
 -- Import DeMoD-Note types for integration
-import DeMoDNote.Types (ReactorState(..), NoteState(..), MIDINote, Velocity)
+import DeMoDNote.Types (ReactorState(..), NoteState(..), MIDINote, Velocity, emptyReactorState, defaultPLLState, defaultOnsetFeatures)
+import qualified DeMoDNote.Config as Config
 
 -- =============================================================================
 -- Configuration Types
 -- =============================================================================
+
+-- | Intro phases
+data IntroPhase
+  = IntroPresents    -- "DeMoD LLC presents" typewriter
+  | IntroReveal      -- Sierpinski triangle scan-line reveal
+  | IntroAstart      -- "Astart" banner display
+  | IntroFadeOut     -- Fade to main visualization
+  | IntroComplete    -- Intro done, show normal UI
+  deriving (Eq, Show)
+
+-- | Intro animation state
+data IntroState = IntroState
+  { introPhase    :: !IntroPhase
+  , introTick     :: !Int           -- Frame counter
+  , charCount     :: !Int           -- Chars revealed in Presents phase
+  , scanRow       :: !Int           -- Rows revealed in Reveal phase
+  , fadeAlpha     :: !Float         -- 1.0 = intro, 0.0 = main viz
+  } deriving (Show)
+
+-- | Audio player state
+data AudioPlayer = NoAudio | Player ProcessHandle
+
+-- | Constants for visualization
+defaultNumLanes :: Int
+defaultNumLanes = 5
+
+defaultPreviewSeconds :: Double
+defaultPreviewSeconds = 3.0
+
+minNoteHeight :: Double
+minNoteHeight = 0.02
+
+-- | Default lane colors (RGB)
+defaultLaneColors :: [(GLfloat, GLfloat, GLfloat)]
+defaultLaneColors = 
+  [ (0.0, 1.0, 0.0)  -- Green
+  , (1.0, 0.0, 0.0)  -- Red
+  , (1.0, 1.0, 0.0)  -- Yellow
+  , (0.0, 0.0, 1.0)  -- Blue
+  , (1.0, 0.5, 0.0)  -- Orange
+  ]
+
+-- | Intro timing constants (in frames @ ~30fps)
+presentsDuration :: Int
+presentsDuration = 90  -- ~3 seconds
+
+revealDuration :: Int
+revealDuration = 120   -- ~4 seconds
+
+astartDuration :: Int
+astartDuration = 60    -- ~2 seconds
+
+fadeOutDuration :: Int
+fadeOutDuration = 30   -- ~1 second
+
+-- =============================================================================
+-- ASCII Banners
+-- =============================================================================
+
+presentsLines :: [String]
+presentsLines =
+  [ "░███████              ░███     ░███            ░███████      ░██         ░██           ░██████  "
+  , "░██   ░██             ░████   ░████            ░██   ░██     ░██         ░██          ░██   ░██ "
+  , "░██    ░██  ░███████  ░██░██ ░██░██  ░███████  ░██    ░██    ░██         ░██         ░██        "
+  , "░██    ░██ ░██    ░██ ░██ ░████ ░██ ░██    ░██ ░██    ░██    ░██         ░██         ░██        "
+  , "░██    ░██ ░█████████ ░██  ░██  ░██ ░██    ░██ ░██    ░██    ░██         ░██         ░██        "
+  , "░██   ░██  ░██        ░██       ░██ ░██    ░██ ░██   ░██     ░██         ░██          ░██   ░██ "
+  , "░███████    ░███████  ░██       ░██  ░███████  ░███████      ░██████████ ░██████████   ░██████  "
+  , "                                                                                                "
+  , "                                                                                                "
+  , "                                                                                                "
+  , "              p r e s e n t s"
+  ]
+
+astartLines :: [String]
+astartLines =
+  [ "   ░███                  ░██                           ░██    "
+  , "  ░██░██                 ░██                           ░██    "
+  , " ░██  ░██   ░███████  ░████████  ░██████   ░██░████ ░████████ "
+  , "░█████████ ░██           ░██          ░██  ░███        ░██    "
+  , "░██    ░██  ░███████     ░██     ░███████  ░██         ░██    "
+  , "░██    ░██        ░██    ░██    ░██   ░██  ░██         ░██    "
+  , "░██    ░██  ░███████      ░████  ░█████░██ ░██          ░████ "
+  ]
+
+-- =============================================================================
+-- Sierpinski Triangle Generation
+-- =============================================================================
+
+renderSierpinski :: Int -> Char -> [String]
+renderSierpinski depth fillChar =
+  let size = 2 ^ depth
+      pad  = max 0 ((80 - (2 * size - 1)) `div` 2)
+      padS = replicate pad ' '
+  in [ padS ++ buildSierpinskiRow size r fillChar | r <- [0 .. size - 1] ]
+
+buildSierpinskiRow :: Int -> Int -> Char -> String
+buildSierpinskiRow size r fillChar =
+  [ cell r c | c <- [0 .. 2 * size - 2] ]
+  where
+    cell row col =
+      let k = col - (size - 1 - row)
+      in if k >= 0 && k <= row && (row .&. k) == k then fillChar else ' '
+
+timeToDepthAndChar :: UTCTime -> (Int, Char, String)
+timeToDepthAndChar utc =
+  let tod   = timeToTimeOfDay (utctDayTime utc)
+      h     = todHour tod
+      m     = todMin  tod
+      s     = floor (todSec tod) :: Int
+      depth = 3 + ((h + m + s) `mod` 4)
+      ch    = "█▓▒░" !! (s `mod` 4)
+      label = pad2 h ++ ":" ++ pad2 m ++ ":" ++ pad2 s
+  in (depth, ch, label)
+  where
+    pad2 n = (if n < 10 then "0" else "") ++ show n
+
+-- =============================================================================
+-- Audio Playback (Cross-platform)
+-- =============================================================================
+
+spawnIntroAudio :: FilePath -> IO AudioPlayer
+spawnIntroAudio path = tryPlayers candidates
+  where
+    candidates =
+      [ ("mpg123",  ["-q",              path])  -- Linux standard
+      , ("afplay",  [                   path])  -- macOS built-in
+      , ("mplayer", ["-really-quiet",   path])  -- fallback
+      ]
+    tryPlayers [] = do
+      putStrLn "[OpenGL] WARNING: no audio player found (mpg123/afplay/mplayer). Continuing without audio."
+      return NoAudio
+    tryPlayers ((cmd, args) : rest) = do
+      result <- try $ createProcess
+        (proc cmd args) { std_out = CreatePipe, std_err = CreatePipe }
+      case result of
+        Left  (_ :: SomeException) -> tryPlayers rest
+        Right (_, _, _, ph)        -> return (Player ph)
+
+stopAudioPlayer :: AudioPlayer -> IO ()
+stopAudioPlayer NoAudio     = return ()
+stopAudioPlayer (Player ph) = void . try @SomeException $
+  terminateProcess ph >> waitForProcess ph
+
+fadeOutAndStopAudio :: AudioPlayer -> IO ()
+fadeOutAndStopAudio NoAudio = return ()
+fadeOutAndStopAudio (Player ph) = void . forkIO $ do
+  -- Gradually reduce volume over 0.5 seconds (best effort)
+  threadDelay 500000  -- 0.5 second delay before stopping
+  void . try @SomeException $ terminateProcess ph >> waitForProcess ph
+
+tryAudioPaths :: [FilePath] -> IO AudioPlayer
+tryAudioPaths [] = do
+  putStrLn "[OpenGL] WARNING: intro.mp3 not found. Continuing without intro audio."
+  return NoAudio
+tryAudioPaths (path:paths) = do
+  exists <- doesFileExist path
+  if exists
+    then spawnIntroAudio path
+    else tryAudioPaths paths
 
 data ShaderSource
   = Embedded !BS.ByteString
@@ -107,6 +272,8 @@ data OpenGLConfig = OpenGLConfig
   , oglSvgFile      :: !(Maybe FilePath)
   , oglFontRegular  :: !FilePath
   , oglFontBold     :: !FilePath
+  , oglSkipIntro    :: !Bool
+  , oglIntroDuration :: !Int
   } deriving (Show)
 
 defaultOpenGLConfig :: OpenGLConfig
@@ -120,9 +287,60 @@ defaultOpenGLConfig = OpenGLConfig
   , oglTracks       = []
   , oglObjFile      = Nothing
   , oglSvgFile      = Nothing
-  , oglFontRegular  = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-  , oglFontBold     = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
+  , oglFontRegular  = "DejaVuSansMono.ttf"
+  , oglFontBold     = "DejaVuSansMono-Bold.ttf"
+  , oglSkipIntro    = False
+  , oglIntroDuration = 10
   }
+
+-- | Find a font file in common system locations
+findFont :: String -> IO (Maybe FilePath)
+findFont fontName = do
+  home <- getHomeDirectory
+  let candidates = 
+        [ "/usr/share/fonts/truetype/dejavu/" ++ fontName
+        , "/usr/share/fonts/truetype/" ++ fontName
+        , "/usr/local/share/fonts/" ++ fontName
+        , home </> ".local/share/fonts/" ++ fontName
+        , home </> ".fonts/" ++ fontName
+        , "/System/Library/Fonts/" ++ fontName  -- macOS
+        , "C:\\Windows\\Fonts\\" ++ fontName    -- Windows
+        ]
+  go candidates
+  where
+    go [] = pure Nothing
+    go (p:ps) = do
+      exists <- doesFileExist p
+      if exists
+        then pure (Just p)
+        else go ps
+
+-- | Load fonts with fallback to system search
+loadFonts :: NVG.Context -> String -> String -> IO ()
+loadFonts ctx regularFont boldFont = do
+  -- Try to find fonts in system paths
+  mbRegPath <- if "/" `elem` regularFont
+                then pure (Just regularFont)  -- Absolute path
+                else findFont regularFont
+  mbBoldPath <- if "/" `elem` boldFont
+                 then pure (Just boldFont)
+                 else findFont boldFont
+  
+  case mbRegPath of
+    Nothing -> putStrLn $ "Warning: Could not find regular font: " ++ regularFont
+    Just path -> do
+      result <- NVG.createFont ctx "regular" path
+      case result of
+        NVG.FontHandle _ -> pure ()
+        _ -> putStrLn $ "Warning: Failed to load regular font from: " ++ path
+  
+  case mbBoldPath of
+    Nothing -> putStrLn $ "Warning: Could not find bold font: " ++ boldFont
+    Just path -> do
+      result <- NVG.createFont ctx "bold" path
+      case result of
+        NVG.FontHandle _ -> pure ()
+        _ -> putStrLn $ "Warning: Failed to load bold font from: " ++ path
 
 -- =============================================================================
 -- Render State (renamed to avoid conflict with Backend.AudioState)
@@ -280,10 +498,13 @@ extractNotes log mf selectedTracks = do
       pure []
     ZM.PPQN division -> do
       let tracks = ZM.mf_tracks mf
-          selTracks = [tracks !! i | i <- selectedTracks, i < length tracks]
+          numTracks = length tracks
+          -- Filter out invalid track indices
+          validTracks = filter (\i -> i >= 0 && i < numTracks) selectedTracks
+          selTracks = [tracks !! i | i <- validTracks]
       if null selTracks
         then do
-          log "WARNING: No valid MIDI tracks selected"
+          log $ "WARNING: No valid MIDI tracks selected (file has " ++ show numTracks ++ " tracks)"
           pure []
         else do
           log $ "Processing " ++ show (length selTracks) ++ " MIDI tracks"
@@ -295,8 +516,7 @@ computeNotes division tracks = reverse finalNotes'
     trackEvents = concatMap (\track -> scanl' (\(cum, _) (dt, ev) -> let newCum = cum + fromIntegral dt in (newCum, ev)) 0 (ZM.getTrackMessages track)) tracks
     allEvents = sortBy (comparing fst) trackEvents
 
-    type ProcessState = (Double, Integer, Double, Map.Map (Int, Int) (Double, Int), [GLNote])
-
+    initialState :: (Double, Integer, Double, Map.Map (Int, Int) (Double, Int), [GLNote])
     initialState = (0.0, 0, 500000.0, Map.empty, [])
 
     process (curTime, lastTick, usPQ, opens, notes) (tick, ev) = case ev of
@@ -334,27 +554,59 @@ data Model = Model
   , modelIndices  :: ![GLuint]
   } deriving (Show)
 
-loadOBJ :: FilePath -> IO Model
+loadOBJ :: FilePath -> IO (Either String Model)
 loadOBJ path = do
-  content <- BS.readFile path
-  let lines' = BS8.lines content
-      (verts, norms, faces) = foldl' parseLine ([], [], []) lines'
-      vertices = concat verts
-      normals = concat norms
-      indices = concatMap expandFace faces
-  pure $ Model vertices normals indices
+  exists <- doesFileExist path
+  if not exists
+    then pure $ Left $ "OBJ file not found: " ++ path
+    else do
+      content <- BS.readFile path
+      let lines' = BS8.lines content
+          (verts, norms, faces) = foldl' parseLine ([], [], []) lines'
+      if null verts
+        then pure $ Left $ "OBJ file contains no vertices: " ++ path
+        else do
+          let vertices = concat verts
+              normals = concat norms
+              indices = concatMap expandFace faces
+          pure $ Right $ Model vertices normals indices
   where
-    parseLine (vs, ns, fs) line | BS8.null line || BS8.head line == '#' = (vs, ns, fs)
-      | "v " `BS8.isPrefixOf` line = let parts = BS8.words (BS8.drop 2 line)
-                                      in (map (read . BS8.unpack) parts : vs, ns, fs)
-      | "vn " `BS8.isPrefixOf` line = let parts = BS8.words (BS8.drop 3 line)
-                                       in (vs, map (read . BS8.unpack) parts : ns, fs)
-      | "f " `BS8.isPrefixOf` line = let parts = BS8.words (BS8.drop 2 line)
-                                      in (vs, ns, map parseFacePart parts : fs)
+    parseLine (vs, ns, fs) line 
+      | BS8.null line || BS8.head line == '#' = (vs, ns, fs)
+      | "v " `BS8.isPrefixOf` line = 
+          let parts = BS8.words (BS8.drop 2 line)
+          in if length parts == 3
+             then (map (safeRead . BS8.unpack) parts : vs, ns, fs)
+             else (vs, ns, fs)
+      | "vn " `BS8.isPrefixOf` line = 
+          let parts = BS8.words (BS8.drop 3 line)
+          in if length parts == 3
+             then (vs, map (safeRead . BS8.unpack) parts : ns, fs)
+             else (vs, ns, fs)
+      | "f " `BS8.isPrefixOf` line = 
+          let parts = BS8.words (BS8.drop 2 line)
+          in if length parts >= 3
+             then (vs, ns, map parseFacePart (take 3 parts) : fs)
+             else (vs, ns, fs)
       | otherwise = (vs, ns, fs)
 
-    parseFacePart bs = let [v, _, n] = BS8.split '/' bs
-                       in (read (BS8.unpack v) - 1, read (BS8.unpack n) - 1)
+    safeRead s = case reads s of
+      [(x, "")] -> x
+      _         -> 0.0
+
+    parseFacePart bs = 
+      let parts = BS8.split '/' bs
+          v = case parts of
+                (vStr:_) -> safeReadInt (BS8.unpack vStr) - 1
+                _ -> 0
+          n = case parts of
+                (_:_:nStr:_) -> safeReadInt (BS8.unpack nStr) - 1
+                _ -> 0
+      in (v, n)
+
+    safeReadInt s = case reads s of
+      [(x, "")] -> x
+      _ -> 0
 
     expandFace [(v1,_), (v2,_), (v3,_)] = [v1, v2, v3]
     expandFace _ = []
@@ -393,14 +645,16 @@ data SVGData = SVGData
   { svgDoc :: !SVG.Document
   } deriving (Show)
 
-loadSVG :: FilePath -> IO SVGData
+loadSVG :: FilePath -> IO (Either String SVGData)
 loadSVG path = do
-  bs <- BS.readFile path
-  case SVGTree.parseSVG bs of
-    Left err -> do
-      putStrLn $ "SVG parse error: " ++ err
-      pure $ SVGData (SVG.Document Nothing Nothing Nothing [] Nothing)
-    Right doc -> pure $ SVGData doc
+  exists <- doesFileExist path
+  if not exists
+    then pure $ Left $ "SVG file not found: " ++ path
+    else do
+      bs <- BS.readFile path
+      case SVGTree.parseSVG bs of
+        Left err -> pure $ Left $ "SVG parse error: " ++ err
+        Right doc -> pure $ Right $ SVGData doc
 
 renderSVG :: NVG.Context -> SVGData -> Float -> Float -> IO ()
 renderSVG ctx SVGData{..} _x _y = do
@@ -424,7 +678,11 @@ renderCommand _ _ = pure ()
 -- =============================================================================
 
 vtyColorToRGB :: VTY.Color -> (Word8, Word8, Word8)
-vtyColorToRGB (VTY.ISOColor n) = if n < 8 then low n else high (n - 8)
+vtyColorToRGB (VTY.ISOColor n) 
+  | n < 0     = (0, 0, 0)
+  | n < 8     = low n
+  | n < 16    = high (n - 8)
+  | otherwise = (0, 0, 0)
   where
     low 0 = (0,0,0)
     low 1 = (128,0,0)
@@ -445,14 +703,16 @@ vtyColorToRGB (VTY.ISOColor n) = if n < 8 then low n else high (n - 8)
     high 7 = (255,255,255)
     high _ = (0,0,0)
 vtyColorToRGB (VTY.Color240 code) 
-  | code < 16 = vtyColorToRGB (VTY.ISOColor code)
-  | code < 232 = let offset = code - 16
-                     r = (offset `div` 36) * 40 + if (offset `div` 36) > 0 then 55 else 0
-                     g = ((offset `div` 6) `mod` 6) * 40 + if ((offset `div` 6) `mod` 6) > 0 then 55 else 0
-                     b = (offset `mod` 6) * 40 + if (offset `mod` 6) > 0 then 55 else 0
-                 in (fromIntegral r, fromIntegral g, fromIntegral b)
-  | otherwise = let gray = fromIntegral $ 8 + (code - 232) * 10 :: Word8
-                in (gray, gray, gray)
+  | code < 0    = (0, 0, 0)
+  | code < 16   = vtyColorToRGB (VTY.ISOColor (fromIntegral code))
+  | code < 232  = let offset = code - 16
+                      r = (offset `div` 36) * 40 + if (offset `div` 36) > 0 then 55 else 0
+                      g = ((offset `div` 6) `mod` 6) * 40 + if ((offset `div` 6) `mod` 6) > 0 then 55 else 0
+                      b = (offset `mod` 6) * 40 + if (offset `mod` 6) > 0 then 55 else 0
+                  in (fromIntegral r, fromIntegral g, fromIntegral b)
+  | code < 256  = let gray = fromIntegral $ 8 + (code - 232) * 10 :: Word8
+                  in (gray, gray, gray)
+  | otherwise   = (0, 0, 0)
 
 vtyAttrFore :: VTY.Attr -> NVG.Color
 vtyAttrFore attr = case VTY.attrForeColor attr of
@@ -737,6 +997,12 @@ data AppState = AppState
   , asCellW          :: !Float
   , asCellH          :: !Float
   , asRunning        :: !(IORef Bool)
+  , asIntroState     :: !(IORef IntroState)
+  , asSkipIntro      :: !(IORef Bool)
+  , asTriangle       :: !([String])
+  , asTriDepth       :: !Int
+  , asTimeLabel      :: !String
+  , asAudioPlayer    :: !(IORef AudioPlayer)
   }
 
 -- =============================================================================
@@ -764,11 +1030,20 @@ reloadShaders AppState{..} = do
 
 keyCallback :: AppState -> GLFW.KeyCallback
 keyCallback st _win key _scan action _mods = do
-  when (key == GLFW.Key'Escape && action == GLFW.KeyState'Pressed) $
-    GLFW.setWindowShouldClose (asWindow st) True
+  -- Handle intro skip
+  intro <- readIORef (asIntroState st)
+  when (introPhase intro /= IntroComplete && 
+        key == GLFW.Key'Space && 
+        action == GLFW.KeyState'Pressed) $
+    skipIntro st
+  
+  -- Handle normal keys
+  when (introPhase intro == IntroComplete) $ do
+    when (key == GLFW.Key'Escape && action == GLFW.KeyState'Pressed) $
+      GLFW.setWindowShouldClose (asWindow st) True
 
-  when (key == GLFW.Key'F5 && action == GLFW.KeyState'Pressed) $
-    reloadShaders st
+    when (key == GLFW.Key'F5 && action == GLFW.KeyState'Pressed) $
+      reloadShaders st
 
 resizeCallback :: AppState -> GLFW.FramebufferSizeCallback
 resizeCallback AppState{..} _win w h = do
@@ -784,8 +1059,217 @@ closeCallback :: GLFW.WindowCloseCallback
 closeCallback win = GLFW.setWindowShouldClose win True
 
 -- =============================================================================
--- ImGui Menu
+-- Intro Rendering
 -- =============================================================================
+
+renderIntroPhase :: AppState -> Int -> Int -> IO ()
+renderIntroPhase st@AppState{..} width height = do
+  intro <- readIORef asIntroState
+  skip  <- readIORef asSkipIntro
+  
+  let ctx = asNvgContext
+  
+  -- Clear with black
+  NVG.beginPath ctx
+  NVG.rect ctx 0 0 (fromIntegral width) (fromIntegral height)
+  NVG.fillColor ctx (NVG.rgb 0 0 0)
+  NVG.fill ctx
+  
+  -- Set global alpha for fade effects
+  NVG.globalAlpha ctx (fadeAlpha intro)
+  
+  case introPhase intro of
+    IntroPresents -> renderPresents st intro width height
+    IntroReveal   -> renderReveal st intro width height
+    IntroAstart   -> renderAstart st intro width height
+    IntroFadeOut  -> renderAstart st intro width height
+    IntroComplete -> pure ()
+  
+  -- Render "Press SPACE to skip" (always visible during intro)
+  NVG.globalAlpha ctx 1.0
+  renderSkipPrompt st width height
+
+renderPresents :: AppState -> IntroState -> Int -> Int -> IO ()
+renderPresents st intro w h = do
+  let ctx = asNvgContext st
+      centerX = fromIntegral w / 2
+      centerY = fromIntegral h / 2
+  
+  -- Draw ASCII art with monospace font
+  NVG.fontFace ctx "monospace"
+  NVG.textAlign ctx (NVG.ALIGN_CENTER .|. NVG.ALIGN_MIDDLE)
+  
+  let lineHeight = 14.0
+      startY = centerY - fromIntegral (length presentsLines) * lineHeight / 2
+  
+  forM_ (zip [0..] presentsLines) $ \(i, line) -> do
+    let charsToReveal = max 0 (min (length line) (charCount intro - sum (map length (take i presentsLines))))
+        revealedLine = take charsToReveal line
+        y = startY + fromIntegral i * lineHeight
+    
+    -- Color gradient based on row
+    let color = if i < 7
+                then NVG.rgba 0 255 255 (floor (fadeAlpha intro * 255))
+                else NVG.rgba 200 200 200 (floor (fadeAlpha intro * 255))
+    NVG.fillColor ctx color
+    NVG.fontSize ctx 10.0
+    NVG.text ctx centerX y (BS8.pack revealedLine)
+  
+  -- Draw "seeding from system time..."
+  NVG.fillColor ctx (NVG.rgba 100 100 100 (floor (fadeAlpha intro * 255)))
+  NVG.fontSize ctx 14.0
+  NVG.text ctx centerX (startY + fromIntegral (length presentsLines + 1) * lineHeight) 
+           "  seeding from system time..."
+
+renderReveal :: AppState -> IntroState -> Int -> Int -> IO ()
+renderReveal st intro w h = do
+  let ctx = asNvgContext st
+      triangle = asTriangle st
+      revealed = scanRow intro
+      centerX = fromIntegral w / 2
+      startY = fromIntegral h / 2 - fromIntegral (length triangle) * 8
+  
+  NVG.fontFace ctx "monospace"
+  NVG.textAlign ctx (NVG.ALIGN_CENTER .|. NVG.ALIGN_MIDDLE)
+  NVG.fontSize ctx 10.0
+  
+  forM_ (take revealed (zip [0..] triangle)) $ \(i, row) -> do
+    let y = startY + fromIntegral i * 14.0
+        -- Color based on row position
+        pct = fromIntegral i / fromIntegral (max 1 (length triangle))
+        color | pct < 0.33 = NVG.rgba 0 255 255 (floor (fadeAlpha intro * 255))
+              | pct < 0.66 = NVG.rgba 0 100 255 (floor (fadeAlpha intro * 255))
+              | otherwise  = NVG.rgba 255 0 255 (floor (fadeAlpha intro * 255))
+    NVG.fillColor ctx color
+    NVG.text ctx centerX y (BS8.pack row)
+  
+  -- Draw footer
+  NVG.fillColor ctx (NVG.rgba 100 100 100 (floor (fadeAlpha intro * 255)))
+  NVG.fontSize ctx 12.0
+  let footerY = startY + fromIntegral (length triangle + 1) * 14.0
+  NVG.text ctx centerX footerY (BS8.pack $ "  seed: " ++ asTimeLabel st ++ "  │  depth: " ++ show (asTriDepth st))
+
+renderAstart :: AppState -> IntroState -> Int -> Int -> IO ()
+renderAstart st intro w h = do
+  let ctx = asNvgContext st
+      centerX = fromIntegral w / 2
+      centerY = fromIntegral h / 2
+  
+  -- Draw Astart banner
+  NVG.fontFace ctx "monospace"
+  NVG.textAlign ctx (NVG.ALIGN_CENTER .|. NVG.ALIGN_MIDDLE)
+  NVG.fillColor ctx (NVG.rgba 255 255 0 (floor (fadeAlpha intro * 255)))
+  NVG.fontSize ctx 10.0
+  
+  let astartY = centerY - fromIntegral (length astartLines + 5) * 7
+  forM_ (zip [0..] astartLines) $ \(i, line) -> do
+    let y = astartY + fromIntegral i * 14.0
+    NVG.text ctx centerX y (BS8.pack line)
+  
+  -- Draw Sierpinski triangle below
+  let triangle = asTriangle st
+      triY = astartY + fromIntegral (length astartLines + 2) * 14.0
+  
+  NVG.fontSize ctx 10.0
+  forM_ (zip [0..] triangle) $ \(i, row) -> do
+    let y = triY + fromIntegral i * 12.0
+        pct = fromIntegral i / fromIntegral (max 1 (length triangle))
+        color | pct < 0.33 = NVG.rgba 0 255 255 (floor (fadeAlpha intro * 255))
+              | pct < 0.66 = NVG.rgba 0 100 255 (floor (fadeAlpha intro * 255))
+              | otherwise  = NVG.rgba 255 0 255 (floor (fadeAlpha intro * 255))
+    NVG.fillColor ctx color
+    NVG.text ctx centerX y (BS8.pack row)
+  
+  -- Draw footer
+  NVG.fillColor ctx (NVG.rgba 100 100 100 (floor (fadeAlpha intro * 255)))
+  NVG.fontSize ctx 12.0
+  let footerY = triY + fromIntegral (length triangle + 1) * 12.0
+  NVG.text ctx centerX footerY (BS8.pack $ "  seed: " ++ asTimeLabel st ++ "  │  depth: " ++ show (asTriDepth st))
+  
+  -- Draw hint
+  NVG.fillColor ctx (NVG.rgba 255 255 255 (floor (fadeAlpha intro * 255)))
+  NVG.text ctx centerX (footerY + 20) (BS8.pack "  [q / ESC]  quit")
+
+renderSkipPrompt :: AppState -> Int -> Int -> IO ()
+renderSkipPrompt st w h = do
+  let ctx = asNvgContext st
+  NVG.fontSize ctx 16.0
+  NVG.fontFace ctx "monospace"
+  NVG.textAlign ctx (NVG.ALIGN_CENTER .|. NVG.ALIGN_BOTTOM)
+  NVG.fillColor ctx (NVG.rgba 150 150 150 255)
+  NVG.text ctx (fromIntegral w / 2) (fromIntegral h - 20) (BS8.pack "Press SPACE to skip")
+
+-- =============================================================================
+-- Intro State Machine
+-- =============================================================================
+
+updateIntroState :: AppState -> IO Bool
+updateIntroState st@AppState{..} = do
+  intro <- readIORef asIntroState
+  skip  <- readIORef asSkipIntro
+  
+  if skip
+    then do
+      -- Skip intro immediately
+      writeIORef asIntroState (intro { introPhase = IntroComplete, fadeAlpha = 0.0 })
+      return True
+    else do
+      let newTick = introTick intro + 1
+      
+      newIntro <- case introPhase intro of
+        IntroPresents -> do
+          let charsPerFrame = 2  -- Reveal 2 chars per frame
+              newCharCount = charCount intro + charsPerFrame
+              totalChars = sum (map length presentsLines)
+          
+          if newTick >= presentsDuration || newCharCount >= totalChars
+            then return intro { introPhase = IntroReveal
+                              , introTick = 0
+                              , charCount = newCharCount }
+            else return intro { introTick = newTick
+                              , charCount = newCharCount }
+        
+        IntroReveal -> do
+          let rowsPerFrame = 1  -- Reveal 1 row per frame
+              totalRows = length asTriangle
+              newScanRow = min totalRows (scanRow intro + rowsPerFrame)
+          
+          if newTick >= revealDuration || newScanRow >= totalRows
+            then return intro { introPhase = IntroAstart
+                              , introTick = 0
+                              , scanRow = newScanRow }
+            else return intro { introTick = newTick
+                              , scanRow = newScanRow }
+        
+        IntroAstart -> do
+          if newTick >= astartDuration
+            then return intro { introPhase = IntroFadeOut
+                              , introTick = 0 }
+            else return intro { introTick = newTick }
+        
+        IntroFadeOut -> do
+          let fadeProgress = fromIntegral newTick / fromIntegral fadeOutDuration
+              newAlpha = max 0.0 (1.0 - fadeProgress)
+          
+          if newTick >= fadeOutDuration
+            then return intro { introPhase = IntroComplete
+                              , fadeAlpha = 0.0 }
+            else return intro { introTick = newTick
+                              , fadeAlpha = newAlpha }
+        
+        IntroComplete -> return intro
+      
+      writeIORef asIntroState newIntro
+      return (introPhase newIntro == IntroComplete)
+
+skipIntro :: AppState -> IO ()
+skipIntro st@AppState{..} = do
+  intro <- readIORef asIntroState
+  unless (introPhase intro == IntroComplete) $ do
+    writeIORef asSkipIntro True
+    -- Fade out audio
+    player <- readIORef asAudioPlayer
+    fadeOutAndStopAudio player
 
 whenM :: Monad m => m Bool -> m () -> m ()
 whenM cond act = cond >>= \b -> when b act
@@ -848,6 +1332,12 @@ renderFrame :: AppState -> IO ()
 renderFrame AppState{..} = do
   GLFW.pollEvents
 
+  -- Get intro state
+  intro <- readIORef asIntroState
+  introComplete <- if introPhase intro == IntroComplete
+                     then return True
+                     else updateIntroState AppState{..}
+
   -- Get state from ReactorState if connected, otherwise use local GLRenderState
   renderState <- case asReactorState of
     Nothing -> readTVarIO asRenderState
@@ -861,136 +1351,146 @@ renderFrame AppState{..} = do
   glClearColor 0.0 0.0 0.02 1.0
   glClear (GL_COLOR_BUFFER_BIT .|. GL_DEPTH_BUFFER_BIT)
 
-  prog <- readIORef asBackgroundProg
-  ul   <- readIORef asUniforms
-  (resW, resH) <- readIORef asResolution
-  (mx, my) <- readIORef asMousePos
+  if not introComplete
+    then do
+      -- Render intro
+      (resW, resH) <- readIORef asResolution
+      
+      NVG.beginFrame asNvgContext (fromIntegral resW) (fromIntegral resH) 1.0
+      renderIntroPhase AppState{..} resW resH
+      NVG.endFrame asNvgContext
+    else do
+      -- Render normal visualization
+      prog <- readIORef asBackgroundProg
+      ul   <- readIORef asUniforms
+      (resW, resH) <- readIORef asResolution
+      (mx, my) <- readIORef asMousePos
 
-  glUseProgram prog
-  when (ulTime ul /= -1) $ glUniform1f (ulTime ul) (realToFrac audioTime)
-  when (ulAmp ul /= -1) $ glUniform1f (ulAmp ul) audioAmp
-  when (ulResolution ul /= -1) $ glUniform2f (ulResolution ul) (fromIntegral resW) (fromIntegral resH)
-  when (ulMouse ul /= -1) $ glUniform2f (ulMouse ul) (realToFrac mx) (realToFrac my)
+      glUseProgram prog
+      when (ulTime ul /= -1) $ glUniform1f (ulTime ul) (realToFrac audioTime)
+      when (ulAmp ul /= -1) $ glUniform1f (ulAmp ul) audioAmp
+      when (ulResolution ul /= -1) $ glUniform2f (ulResolution ul) (fromIntegral resW) (fromIntegral resH)
+      when (ulMouse ul /= -1) $ glUniform2f (ulMouse ul) (realToFrac mx) (realToFrac my)
 
-  glBindVertexArray asQuadVAO
-  glDrawArrays GL_TRIANGLES 0 6
-  glBindVertexArray 0
-
-  -- Render detected note from backend
-  renderDetectedNote renderState asNvgContext resW resH
-
-  toggleNotes <- readIORef asToggleNotes
-  when toggleNotes $ do
-    notes <- readIORef asNotes
-    when (not $ null notes) $ do
-      glUseProgram asNoteProgram
-
-      glBindVertexArray asLaneVAO
-      glDrawArrays GL_LINES 0 (fromIntegral $ (asNumLanes - 1) * 2)
+      glBindVertexArray asQuadVAO
+      glDrawArrays GL_TRIANGLES 0 6
       glBindVertexArray 0
 
-      let preview = asPreviewSeconds
-          visible = filter (\n -> glnStart n > audioTime - 0.5 && glnStart n < audioTime + preview) notes
-          noteWidth = 2.0 / fromIntegral asNumLanes * 0.8 :: GLfloat
-          laneWidth = 2.0 / fromIntegral asNumLanes :: GLfloat
-          minDurHeight = 0.02 :: Double
+      -- Render detected note from backend
+      renderDetectedNote renderState asNvgContext resW resH
 
-          buildVertices n = let lane = glnPitch n `mod` asNumLanes
-                                (r,g,b) = asColors !! min lane (length asColors - 1)
-                                xCenter = -1.0 + laneWidth * (fromIntegral lane + 0.5)
-                                left = xCenter - noteWidth / 2
-                                right = xCenter + noteWidth / 2
-                                distHead = glnStart n - audioTime
-                                distTail = distHead + max minDurHeight (glnDur n)
-                                yHead = -1.0 + 2.0 * (realToFrac distHead / realToFrac preview) :: GLfloat
-                                yTail = -1.0 + 2.0 * (realToFrac distTail / realToFrac preview) :: GLfloat
-                                yH = max (-1.0) (min 1.0 yHead)
-                                yT = max (-1.0) (min 1.0 yTail)
-                            in if yT <= yH || yH > 1.0 || yT < -1.0 then [] else
-                                [left, yH, r, g, b, right, yH, r, g, b, left, yT, r, g, b,
-                                 left, yT, r, g, b, right, yH, r, g, b, right, yT, r, g, b]
+      toggleNotes <- readIORef asToggleNotes
+      when toggleNotes $ do
+        notes <- readIORef asNotes
+        when (not $ null notes) $ do
+          glUseProgram asNoteProgram
 
-          vertices = concatMap buildVertices visible
+          glBindVertexArray asLaneVAO
+          glDrawArrays GL_LINES 0 (fromIntegral $ (asNumLanes - 1) * 2)
+          glBindVertexArray 0
 
-      unless (null vertices) $ do
-        glBindBuffer GL_ARRAY_BUFFER asNoteVBO
-        withArray vertices $ \ptr ->
-          glBufferSubData GL_ARRAY_BUFFER 0 (fromIntegral $ length vertices * sizeOf (0 :: GLfloat)) (castPtr ptr)
+          let preview = asPreviewSeconds
+              visible = filter (\n -> glnStart n > audioTime - 0.5 && glnStart n < audioTime + preview) notes
+              noteWidth = 2.0 / fromIntegral asNumLanes * 0.8 :: GLfloat
+              laneWidth = 2.0 / fromIntegral asNumLanes :: GLfloat
 
-        glBindVertexArray asNoteVAO
-        glDrawArrays GL_TRIANGLES 0 (fromIntegral $ length vertices `div` 5)
-        glBindVertexArray 0
+              buildVertices n = let lane = glnPitch n `mod` asNumLanes
+                                    (r,g,b) = asColors !! min lane (length asColors - 1)
+                                    xCenter = -1.0 + laneWidth * (fromIntegral lane + 0.5)
+                                    left = xCenter - noteWidth / 2
+                                    right = xCenter + noteWidth / 2
+                                    distHead = glnStart n - audioTime
+                                    distTail = distHead + max minNoteHeight (glnDur n)
+                                    yHead = -1.0 + 2.0 * (realToFrac distHead / realToFrac preview) :: GLfloat
+                                    yTail = -1.0 + 2.0 * (realToFrac distTail / realToFrac preview) :: GLfloat
+                                    yH = max (-1.0) (min 1.0 yHead)
+                                    yT = max (-1.0) (min 1.0 yTail)
+                                in if yT <= yH || yH > 1.0 || yT < -1.0 then [] else
+                                    [left, yH, r, g, b, right, yH, r, g, b, left, yT, r, g, b,
+                                     left, yT, r, g, b, right, yH, r, g, b, right, yT, r, g, b]
 
-  toggle3D <- readIORef asToggle3D
-  when toggle3D $ do
-    mbModel <- readIORef asModel
-    case mbModel of
-      Nothing -> pure ()
-      Just model -> do
-        glEnable GL_DEPTH_TEST
-        glUseProgram asModelProgram
+              vertices = concatMap buildVertices visible
 
-        let mu = asModelUniforms
-        rot <- readIORef asModelRotation
-        modifyIORef' asModelRotation (+0.01)
+          unless (null vertices) $ do
+            glBindBuffer GL_ARRAY_BUFFER asNoteVBO
+            withArray vertices $ \ptr ->
+              glBufferSubData GL_ARRAY_BUFFER 0 (fromIntegral $ length vertices * sizeOf (0 :: GLfloat)) (castPtr ptr)
 
-        let modelMat = [cos rot, 0, sin rot, 0, 0, 1, 0, 0, -sin rot, 0, cos rot, 0, 0, 0, 0, 1] :: [GLfloat]
-            viewMat = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-3,1]
-            projMat = perspective 45.0 (fromIntegral resW / fromIntegral resH) 0.1 100.0
-            lightPos = [2.0, 3.0, -1.0] :: [GLfloat]
-            viewPos = [0,0,3] :: [GLfloat]
-            lightColor = [1,1,1] :: [GLfloat]
-            objectColor = [1,0.5,0.31] :: [GLfloat]
+            glBindVertexArray asNoteVAO
+            glDrawArrays GL_TRIANGLES 0 (fromIntegral $ length vertices `div` 5)
+            glBindVertexArray 0
 
-        withArray modelMat $ \ptr -> glUniformMatrix4fv (muModel mu) 1 GL_FALSE ptr
-        withArray viewMat $ \ptr -> glUniformMatrix4fv (muView mu) 1 GL_FALSE ptr
-        withArray projMat $ \ptr -> glUniformMatrix4fv (muProjection mu) 1 GL_FALSE ptr
-        withArray lightPos $ \ptr -> glUniform3fv (muLightPos mu) 1 ptr
-        withArray viewPos $ \ptr -> glUniform3fv (muViewPos mu) 1 ptr
-        withArray lightColor $ \ptr -> glUniform3fv (muLightColor mu) 1 ptr
-        withArray objectColor $ \ptr -> glUniform3fv (muObjectColor mu) 1 ptr
+      toggle3D <- readIORef asToggle3D
+      when toggle3D $ do
+        mbModel <- readIORef asModel
+        case mbModel of
+          Nothing -> pure ()
+          Just model -> do
+            glEnable GL_DEPTH_TEST
+            glUseProgram asModelProgram
 
-        glBindVertexArray asModelVAO
-        glDrawElements GL_TRIANGLES (fromIntegral $ length (modelIndices model)) GL_UNSIGNED_INT nullPtr
-        glBindVertexArray 0
-        glDisable GL_DEPTH_TEST
+            let mu = asModelUniforms
+            rot <- readIORef asModelRotation
+            modifyIORef' asModelRotation (+0.01)
 
-  NVG.beginFrame asNvgContext (fromIntegral resW) (fromIntegral resH) 1.0
+            let modelMat = [cos rot, 0, sin rot, 0, 0, 1, 0, 0, -sin rot, 0, cos rot, 0, 0, 0, 0, 1] :: [GLfloat]
+                viewMat = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,-3,1]
+                projMat = perspective 45.0 (fromIntegral resW / fromIntegral resH) 0.1 100.0
+                lightPos = [2.0, 3.0, -1.0] :: [GLfloat]
+                viewPos = [0,0,3] :: [GLfloat]
+                lightColor = [1,1,1] :: [GLfloat]
+                objectColor = [1,0.5,0.31] :: [GLfloat]
 
-  toggleSVG <- readIORef asToggleSVG
-  when toggleSVG $ do
-    mbSvg <- readIORef asSvgData
-    case mbSvg of
-      Nothing -> pure ()
-      Just svg -> renderSVG asNvgContext svg 100 100
+            withArray modelMat $ \ptr -> glUniformMatrix4fv (muModel mu) 1 GL_FALSE ptr
+            withArray viewMat $ \ptr -> glUniformMatrix4fv (muView mu) 1 GL_FALSE ptr
+            withArray projMat $ \ptr -> glUniformMatrix4fv (muProjection mu) 1 GL_FALSE ptr
+            withArray lightPos $ \ptr -> glUniform3fv (muLightPos mu) 1 ptr
+            withArray viewPos $ \ptr -> glUniform3fv (muViewPos mu) 1 ptr
+            withArray lightColor $ \ptr -> glUniform3fv (muLightColor mu) 1 ptr
+            withArray objectColor $ \ptr -> glUniform3fv (muObjectColor mu) 1 ptr
 
-  toggleTUI <- readIORef asToggleTUI
-  when toggleTUI $ do
-    pic <- readTVarIO asTuiPicture
-    let imgW = VTY.imageWidth (VTY.picImage pic)
-        imgH = VTY.imageHeight (VTY.picImage pic)
-    when (imgW > 0 && imgH > 0) $ do
-      let winX = 50 :: Float
-          winY = fromIntegral resH - 50 - asCellH * fromIntegral imgH
-          winW = asCellW * fromIntegral imgW
-          winH = asCellH * fromIntegral imgH
-      NVG.strokeColor asNvgContext (NVG.rgba 255 255 255 128)
-      NVG.strokeWidth asNvgContext 2.0
-      NVG.beginPath asNvgContext
-      NVG.rect asNvgContext winX winY winW winH
-      NVG.stroke asNvgContext
+            glBindVertexArray asModelVAO
+            glDrawElements GL_TRIANGLES (fromIntegral $ length (modelIndices model)) GL_UNSIGNED_INT nullPtr
+            glBindVertexArray 0
+            glDisable GL_DEPTH_TEST
 
-      NVG.scissor asNvgContext winX winY winW winH
-      renderVtyPicture asNvgContext (winX + 4) (winY + 4) asCellW asCellH pic
-      NVG.resetScissor asNvgContext
+      NVG.beginFrame asNvgContext (fromIntegral resW) (fromIntegral resH) 1.0
 
-  NVG.endFrame asNvgContext
+      toggleSVG <- readIORef asToggleSVG
+      when toggleSVG $ do
+        mbSvg <- readIORef asSvgData
+        case mbSvg of
+          Nothing -> pure ()
+          Just svg -> renderSVG asNvgContext svg 100 100
 
-  ImGuiGLFW.newFrame
-  ImGui.newFrame
-  renderMenu AppState{..}
-  ImGui.render
-  ImGuiGL3.renderDrawData =<< ImGui.getDrawData
+      toggleTUI <- readIORef asToggleTUI
+      when toggleTUI $ do
+        pic <- readTVarIO asTuiPicture
+        let imgW = VTY.imageWidth (VTY.picImage pic)
+            imgH = VTY.imageHeight (VTY.picImage pic)
+        when (imgW > 0 && imgH > 0) $ do
+          let winX = 50 :: Float
+              winY = fromIntegral resH - 50 - asCellH * fromIntegral imgH
+              winW = asCellW * fromIntegral imgW
+              winH = asCellH * fromIntegral imgH
+          NVG.strokeColor asNvgContext (NVG.rgba 255 255 255 128)
+          NVG.strokeWidth asNvgContext 2.0
+          NVG.beginPath asNvgContext
+          NVG.rect asNvgContext winX winY winW winH
+          NVG.stroke asNvgContext
+
+          NVG.scissor asNvgContext winX winY winW winH
+          renderVtyPicture asNvgContext (winX + 4) (winY + 4) asCellW asCellH pic
+          NVG.resetScissor asNvgContext
+
+      NVG.endFrame asNvgContext
+
+      -- Only render ImGui menu after intro
+      ImGuiGLFW.newFrame
+      ImGui.newFrame
+      renderMenu AppState{..}
+      ImGui.render
+      ImGuiGL3.renderDrawData =<< ImGui.getDrawData
 
   GLFW.swapBuffers asWindow
 
@@ -1101,12 +1601,17 @@ runOpenGLVisualizer cfg reactorVar = do
 
   quadVAO <- setupQuadGeometry
   (noteVAO, noteVBO) <- setupNoteGeometry
-  let numLanes = 5
-  laneVAO <- setupLaneLines numLanes
+  laneVAO <- setupLaneLines defaultNumLanes
 
   mbModel <- case oglObjFile cfg of
     Nothing -> pure Nothing
-    Just p -> Just <$> loadOBJ p
+    Just p -> do
+      result <- loadOBJ p
+      case result of
+        Left err -> do
+          logger $ "OBJ load error: " ++ err
+          pure Nothing
+        Right model -> pure (Just model)
   modelVAO <- case mbModel of
     Nothing -> pure 0
     Just m -> do
@@ -1115,7 +1620,13 @@ runOpenGLVisualizer cfg reactorVar = do
 
   mbSvg <- case oglSvgFile cfg of
     Nothing -> pure Nothing
-    Just p -> Just <$> loadSVG p
+    Just p -> do
+      result <- loadSVG p
+      case result of
+        Left err -> do
+          logger $ "SVG load error: " ++ err
+          pure Nothing
+        Right svg -> pure (Just svg)
 
   notes <- case oglMidiFile cfg of
     Nothing -> pure []
@@ -1128,8 +1639,16 @@ runOpenGLVisualizer cfg reactorVar = do
   logger $ "Extracted " ++ show (length notes) ++ " notes from MIDI"
 
   nvgCtx <- NVG.createGL3 (NVG.Antialias .|. NVG.StencilStrokes)
-  _ <- NVG.createFont nvgCtx "regular" (oglFontRegular cfg)
-  _ <- NVG.createFont nvgCtx "bold" (oglFontBold cfg)
+  loadFonts nvgCtx (oglFontRegular cfg) (oglFontBold cfg)
+  -- Also create monospace font for intro
+  mbMonoPath <- findFont "DejaVuSansMono.ttf"
+  case mbMonoPath of
+    Nothing -> putStrLn "Warning: Could not find monospace font for intro"
+    Just path -> do
+      result <- NVG.createFont nvgCtx "monospace" path
+      case result of
+        NVG.FontHandle _ -> pure ()
+        _ -> putStrLn $ "Warning: Failed to load monospace font from: " ++ path
   NVG.fontSize nvgCtx 12.0
   NVG.fontFace nvgCtx "regular"
   (_, _, lineH) <- NVG.textMetrics nvgCtx
@@ -1142,6 +1661,18 @@ runOpenGLVisualizer cfg reactorVar = do
 
   -- Create local render state TVar
   renderTV <- newTVarIO $ GLRenderState 0.0 0.5 Nothing [] 0.0 [] 120.0
+
+  -- Initialize intro state and triangle
+  now <- getCurrentTime
+  let (depth, fillChar, timeLabel) = timeToDepthAndChar now
+      triangle = renderSierpinski depth fillChar
+      initIntroState = IntroState
+        { introPhase = IntroPresents
+        , introTick = 0
+        , charCount = 0
+        , scanRow = 0
+        , fadeAlpha = 1.0
+        }
 
   bgProgRef <- newIORef bgProg
   ulRef <- newIORef bgUL
@@ -1165,8 +1696,11 @@ runOpenGLVisualizer cfg reactorVar = do
   rotationRef <- newIORef 0.0
   runningRef <- newIORef True
   tuiTV <- newTVarIO VTY.emptyPicture
+  introStateRef <- newIORef initIntroState
+  skipIntroRef <- newIORef False
+  audioPlayerRef <- newIORef NoAudio
 
-  let colors = [(0.0,1.0,0.0), (1.0,0.0,0.0), (1.0,1.0,0.0), (0.0,0.0,1.0), (1.0,0.5,0.0)]
+  let colors = defaultLaneColors
       appState = AppState
         { asWindow = win
         , asBackgroundProg = bgProgRef
@@ -1190,8 +1724,8 @@ runOpenGLVisualizer cfg reactorVar = do
         , asLogger = logger
         , asShaderConfig = shaderCfgRef
         , asNotes = notesRef
-        , asPreviewSeconds = 3.0
-        , asNumLanes = numLanes
+        , asPreviewSeconds = defaultPreviewSeconds
+        , asNumLanes = defaultNumLanes
         , asColors = colors
         , asToggleNotes = toggleNotesRef
         , asToggle3D = toggle3DRef
@@ -1208,6 +1742,12 @@ runOpenGLVisualizer cfg reactorVar = do
         , asCellW = cellW
         , asCellH = cellH
         , asRunning = runningRef
+        , asIntroState = introStateRef
+        , asSkipIntro = skipIntroRef
+        , asTriangle = triangle
+        , asTriDepth = depth
+        , asTimeLabel = timeLabel
+        , asAudioPlayer = audioPlayerRef
         }
 
   GLFW.setKeyCallback win $ Just (keyCallback appState)
@@ -1215,12 +1755,37 @@ runOpenGLVisualizer cfg reactorVar = do
   GLFW.setCursorPosCallback win $ Just (cursorPosCallback appState)
   GLFW.setWindowCloseCallback win $ Just closeCallback
 
+  -- Handle skip intro from config
+  when (oglSkipIntro cfg) $ do
+    writeIORef introStateRef (initIntroState { introPhase = IntroComplete, fadeAlpha = 0.0 })
+    writeIORef skipIntroRef True
+    logger "Intro skipped (config)"
+
+  -- Start intro audio if not skipping
+  unless (oglSkipIntro cfg) $ do
+    audioPlayer <- case oglMidiFile cfg of
+      -- Use intro.mp3 from data directory
+      Nothing -> do
+        home <- getHomeDirectory
+        let candidates = 
+              [ "/home/asher/DeMoD-Note/assets/intro.mp3"
+              , home </> ".local/share/demod-note/intro.mp3"
+              , "/usr/share/demod-note/intro.mp3"
+              ]
+        tryAudioPaths candidates
+      Just _ -> return NoAudio  -- Don't play intro if MIDI file specified
+    writeIORef audioPlayerRef audioPlayer
+
   logger "All systems initialized. Entering render loop."
-  logger "Press F5 to live-reload shaders | ESC to quit"
+  logger "Press F5 to live-reload shaders | SPACE to skip intro | ESC to quit"
 
   mainLoop appState
 
   -- Cleanup
+  stopAudioPlayer =<< readIORef audioPlayerRef
+
+  -- Cleanup
+  stopAudioPlayer =<< readIORef audioPlayerRef
   ImGuiGL3.shutdown
   ImGuiGLFW.shutdown
   ImGui.destroyContext =<< ImGui.getCurrentContext
@@ -1235,15 +1800,7 @@ runOpenGLVisualizer cfg reactorVar = do
 -- | Run OpenGL visualizer standalone (without backend connection)
 runOpenGLStandalone :: OpenGLConfig -> IO ()
 runOpenGLStandalone cfg = do
-  -- Create a dummy reactor state
-  reactorVar <- newTVarIO $ ReactorState
-    { currentNotes = []
-    , noteStateMach = Idle
-    , pllStateMach = DeMoDNote.Types.defaultPLLState
-    , onsetFeatures = DeMoDNote.Types.defaultOnsetFeatures
-    , lastOnsetTime = 0
-    , config = DeMoDNote.Config.defaultConfig
-    , reactorBPM = 120.0
-    , reactorThreshold = -40.0
-    }
+  -- Create a dummy reactor state using the proper constructor
+  let dummyConfig = Config.defaultConfig
+  reactorVar <- newTVarIO (emptyReactorState dummyConfig)
   runOpenGLVisualizer cfg reactorVar
