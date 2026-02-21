@@ -1,45 +1,53 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- DeMoD.hs — Production build
 -- "DeMoD LLC presents" typewriter → time-seeded Sierpinski scan → Astart TUI
--- Audio: plays an MP3 via mpg123 (Linux) or afplay (macOS) in a background thread
+-- Audio: plays intro.mp3 by default via mpg123 (Linux) or afplay (macOS)
 --
 -- Usage:
---   cabal run demod                          # no audio
---   cabal run demod -- --audio intro.mp3     # with audio
+--   cabal run demod              # plays intro.mp3 from data-files
+--   cabal run demod -- --no-audio   # skip audio
+--   cabal run demod -- --audio custom.mp3  # use custom audio
 --
 -- Dependencies: brick, vty, time, process
--- Build: cabal build && cabal run demod -- --audio intro.mp3
+-- Build: cabal build && cabal run demod
 
 module Main where
 
 import Brick
 import Brick.BChan                (newBChan, writeBChan)
-import qualified Graphics.Vty     as V
+import Brick.Widgets.Center       (center)
+import qualified Graphics.Vty          as V
+import Graphics.Vty.CrossPlatform (mkVty)
 import Data.Bits                  ((.&.))
 import Control.Concurrent         (forkIO, threadDelay)
 import Control.Monad              (forever, void)
 import Control.Exception          (SomeException, try)
 import Data.Time                  (getCurrentTime, UTCTime(..), timeToTimeOfDay, TimeOfDay(..))
-import System.Process             (createProcess, proc, std_out, std_err,
-                                   StdStream(..), ProcessHandle, terminateProcess,
-                                   waitForProcess)
+import System.Process             (createProcess, proc, std_out, std_err, StdStream(..),
+                                   ProcessHandle, terminateProcess, waitForProcess)
 import System.Environment         (getArgs)
 import System.IO                  (hPutStrLn, stderr)
+import Paths_DeMoD_Note           (getDataFileName)
 
 -- ────────────────────────────────────────────────────────────────
 -- CLI args
 -- ────────────────────────────────────────────────────────────────
 
-data Config = Config { cfgAudioPath :: Maybe FilePath } deriving Show
+data AudioConfig = AudioDefault | AudioFile FilePath | AudioOff deriving Show
+
+data Config = Config { cfgAudio :: AudioConfig } deriving Show
 
 parseArgs :: [String] -> Config
-parseArgs args = Config { cfgAudioPath = go args }
+parseArgs args = Config { cfgAudio = go args }
   where
-    go ("--audio" : path : _) = Just path
+    go ("--no-audio" : rest) = AudioOff
+    go ("--audio" : path : _) = AudioFile path
     go (_ : rest)             = go rest
-    go []                     = Nothing
+    go []                     = AudioDefault  -- play intro.mp3 by default
 
 -- ────────────────────────────────────────────────────────────────
 -- Events & State
@@ -299,7 +307,7 @@ spawnAudio path = tryPlayers candidates
       return NoAudio
     tryPlayers ((cmd, args) : rest) = do
       result <- try $ createProcess
-        (proc cmd args) { std_out = NoHandle, std_err = NoHandle }
+        (proc cmd args) { std_out = CreatePipe, std_err = CreatePipe }
       case result of
         Left  (_ :: SomeException) -> tryPlayers rest
         Right (_, _, _, ph)        -> return (Player ph)
@@ -339,12 +347,18 @@ main = do
     threadDelay fpsDelay
 
   -- Audio — background, non-blocking
-  audio <- case cfgAudioPath cfg of
-    Nothing   -> return NoAudio
-    Just path -> spawnAudio path
+  -- Default: play intro.mp3 from data-files
+  -- --no-audio: skip audio
+  -- --audio path: use custom file
+  audio <- case cfgAudio cfg of
+    AudioOff -> return NoAudio
+    AudioFile path -> spawnAudio path
+    AudioDefault -> do
+      introPath <- getDataFileName "assets/intro.mp3"
+      spawnAudio introPath
 
   -- Brick TUI
-  let buildVty = V.mkVty V.defaultConfig
+  let buildVty = mkVty V.defaultConfig
   vty     <- buildVty
   finalSt <- customMain vty buildVty (Just chan) app initSt
 
