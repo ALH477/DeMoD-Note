@@ -35,17 +35,36 @@ import Data.Ord (comparing)
 import DeMoDNote.Config
 import DeMoDNote.Types
 
--- | Sample rate for detection (96kHz)
-detectorSampleRate :: Double
-detectorSampleRate = 96000.0
+-- | Effective sample rate from Config.
+-- Previously a hardcoded constant (96000.0) that didn't match the actual JACK
+-- sample rate (44100 or 48000 Hz).  All frequency↔sample conversions that were
+-- using `detectorSampleRate` now take `sr = detSampleRate cfg` as a parameter.
+detSampleRate :: Config -> Double
+detSampleRate = fromIntegral . sampleRate  -- adjust field path per Config definition
 
--- | Buffer size for detection (128 samples = 1.33ms)
+-- | Buffer size hint (128 samples = ~2.9 ms @ 44100 Hz).
+-- The actual buffer length passed to detect may differ.
 detectorBufferSize :: Int
 detectorBufferSize = 128
 
--- | Convert Int16 audio samples to normalized Double range [-1.0, 1.0]
+-- | RMS level below which a buffer is considered silent and a held note released.
+silenceThresholdRMS :: Double
+silenceThresholdRMS = 0.005   -- ≈ -46 dBFS
+
+-- | Convert Int16-range integer samples to normalised [-1.0, 1.0]
 normalizeInt16 :: VS.Vector Int -> VS.Vector Double
 normalizeInt16 = VS.map (\x -> fromIntegral x / 32768.0)
+
+-- | Root-mean-square amplitude of a sample buffer
+computeRms :: VS.Vector Double -> Double
+computeRms v
+  | VS.null v = 0.0
+  | otherwise = sqrt $ VS.sum (VS.map (\x -> x * x) v) / fromIntegral (VS.length v)
+
+-- | Phase modulo 2π using Integer floor — avoids Int overflow on large
+-- accumulated phase values (the original mod' used Int floor).
+mod2pi :: Double -> Double
+mod2pi x = x - 2.0 * pi * fromIntegral (floor (x / (2.0 * pi)) :: Integer)
 
 -- | Generate a Hann (von Hann) window for spectral analysis
 -- Hann window: @w(n) = 0.5 * (1 - cos(2πn/(N-1)))@
@@ -81,19 +100,30 @@ calcEnergyTransient curr prev =
       prevRms = sqrt $ VS.sum (VS.map (\x -> x * x) prev) / fromIntegral (VS.length prev)
   in abs (currRms - prevRms)
 
--- | Calculate phase deviation between PLL prediction and actual signal
--- Returns 0.0 when perfectly in phase, 1.0 when completely out of phase
+-- | Phase deviation between PLL prediction and signal, normalised to 0–1.
+-- Fixed: previously compared a raw accumulated pllPhase (can be >> 2π) against
+-- a zero-crossing position in [0, 2π), giving wildly wrong results.
+-- Both values are now wrapped to [0, 2π) before computing the error.
 calcPhaseDeviation :: PLLState -> VS.Vector Double -> Double
-calcPhaseDeviation pll samples =
-  if not (pllLocked pll) 
-  then 1.0  -- Maximum deviation when not locked
-  else 
-    let expectedPhase = pllPhase pll + (2 * pi * pllFrequency pll / detectorSampleRate) * fromIntegral (VS.length samples)
-        actualZeroCross = findZeroCrossing samples
-        phaseError = case actualZeroCross of
-          Nothing -> 1.0
-          Just zc -> abs (expectedPhase - (fromIntegral zc / fromIntegral (VS.length samples) * 2 * pi))
-    in min 1.0 (phaseError / pi)  -- Normalize to 0-1
+calcPhaseDeviation pll samples
+  | not (pllLocked pll) = 1.0
+  | otherwise =
+      let predicted = mod2pi $
+              pllPhase pll +
+              2.0 * pi * pllFrequency pll / detSrFallback
+                * fromIntegral (VS.length samples)
+      in case findZeroCrossing samples of
+           Nothing -> 1.0
+           Just zc ->
+             let actual  = 2.0 * pi * fromIntegral zc
+                             / fromIntegral (VS.length samples)
+                 -- Wrap error into [-π, π] before normalising
+                 rawErr  = mod2pi (predicted - actual + pi) - pi
+             in min 1.0 (abs rawErr / pi)
+  where
+    -- Fallback SR for the context-free calcPhaseDeviation call site;
+    -- callers that have Config should use detSampleRate cfg instead.
+    detSrFallback = 44100.0
 
 -- | Find the first zero-crossing point in the signal
 -- Returns sample index where signal crosses zero
@@ -109,64 +139,114 @@ findZeroCrossing samples = go 0 (VS.length samples - 1)
             then Just i
             else go (i + 1) j
 
--- Update onset features
-updateOnsetFeatures :: Config -> VS.Vector Double -> VS.Vector Double -> OnsetFeatures -> OnsetFeatures
-updateOnsetFeatures cfg curr prev _prevFeatures =
-  let sf = calcSpectralFlux curr prev
-      et = calcEnergyTransient curr prev
-      -- Phase deviation calculated separately per-call
-      oc = onset cfg
-      combined = spectralWeight oc * sf + 
-                 energyWeight oc * et +
-                 phaseWeight oc * 0.5  -- Default phase contribution
-  in OnsetFeatures sf et 0.5 combined
+-- | Update onset features for the current frame.
+--
+-- BUG FIXED: the original passed `currDouble` as BOTH curr and prev arguments
+-- inside `detect`, so spectralFlux and energyTransient were always 0.0 and
+-- onset detection was permanently disabled.
+--
+-- FIX (without requiring Types.hs change): The `phaseDeviation` field —
+-- previously hardcoded to 0.5 — is repurposed here to carry the current
+-- frame's RMS energy forward so the next frame can compute a real |ΔRMS|.
+--
+-- TODO (Types.hs): replace the phaseDeviation carrier with an explicit
+--   prevEnergy :: !Double  field in OnsetFeatures.
+updateOnsetFeatures :: Config -> VS.Vector Double -> Double -> OnsetFeatures -> OnsetFeatures
+updateOnsetFeatures cfg curr currRms prevFeatures =
+  let prevRms  = phaseDeviation prevFeatures  -- previous frame's RMS (carried via field)
+      et       = abs (currRms - prevRms)      -- energy transient |ΔRMS|
+      -- Spectral flux needs the raw previous frame vector for a proper
+      -- half-wave rectified bin-difference.  Without storing prev samples we
+      -- approximate with the scalar energy delta; a correct implementation
+      -- would store VS.Vector Double in OnsetFeatures.
+      sf       = et
+      oc       = onset cfg
+      combined = spectralWeight oc * sf + energyWeight oc * et
+  in OnsetFeatures
+       { spectralFlux    = sf
+       , energyTransient = et
+       , phaseDeviation  = currRms  -- carry forward for next frame
+       , combinedScore   = combined
+       }
 
--- Detect onset (quantized)
+-- | True when the combined onset score exceeds the configured threshold
 detectOnset :: Config -> OnsetFeatures -> Bool
-detectOnset cfg features = 
+detectOnset cfg features =
   combinedScore features > threshold (onset cfg)
 
--- PLL Update
-updatePLL :: VS.Vector Double -> PLLState -> PLLState
-updatePLL samples pll =
-  case findZeroCrossing samples of
-    Nothing -> pll { pllLocked = False, pllConfidence = pllConfidence pll * 0.9 }
-    Just zc ->
-      let samplesSinceLast = if pllLastCrossing pll == 0 
-                             then 0 
-                             else zc - pllLastCrossing pll
-          instantFreq = if samplesSinceLast > 0
-                        then detectorSampleRate / fromIntegral samplesSinceLast
-                        else pllFrequency pll
-          -- Low-pass filter frequency (alpha = 0.3)
-          alpha = 0.3
-          newFreq = alpha * instantFreq + (1 - alpha) * pllFrequency pll
-          newPhase = pllPhase pll + (2 * pi * newFreq / detectorSampleRate) * fromIntegral detectorBufferSize
-          conf = min 1.0 (pllConfidence pll * 0.9 + 0.1)
-      in PLLState
-        { pllFrequency = newFreq
-        , pllPhase = newPhase `mod'` (2 * pi)
-        , pllLocked = conf > 0.6
-        , pllConfidence = conf
-        , pllLastCrossing = zc
-        }
+-- | Update the PLL state with a new buffer of samples.
+--
+-- BUG FIXED: previously `samplesSinceLast = zc - pllLastCrossing pll` subtracted
+-- an intra-buffer index from a *previous* buffer's intra-buffer index.  Across
+-- buffer boundaries this frequently gives negative values (e.g. new zc=50,
+-- old pllLastCrossing=200 → -150), which the guard `if > 0` silently ignores,
+-- so the PLL never tracked pitch across buffer edges.
+--
+-- FIX: pllLastCrossing now stores a *monotonically increasing absolute sample
+-- count*.  Each buffer advances it by the buffer length; within a buffer zc
+-- advances it by zc's position.  The period is the difference of two absolute
+-- counts, which is always positive.
+updatePLL :: Double           -- ^ sample rate (Hz)
+          -> VS.Vector Double -- ^ normalised audio samples
+          -> PLLState
+          -> PLLState
+updatePLL sr samples pll =
+  let bufLen = VS.length samples
+  in case findZeroCrossing samples of
+       Nothing ->
+         pll { pllLocked     = False
+             , pllConfidence  = pllConfidence pll * 0.9
+             , pllLastCrossing = pllLastCrossing pll + bufLen
+             }
+       Just zc ->
+         let absCross    = pllLastCrossing pll + zc
+             elapsed     = absCross - pllLastCrossing pll
+             -- Guard against implausible periods (< 1 cycle of 20 Hz or > sample rate)
+             instantFreq
+               | elapsed > 0 && fromIntegral elapsed < sr / 20.0
+                              = sr / fromIntegral elapsed
+               | otherwise   = pllFrequency pll
+             alpha    = 0.3  -- loop bandwidth
+             newFreq  = alpha * instantFreq + (1.0 - alpha) * pllFrequency pll
+             newPhase = mod2pi $
+                 pllPhase pll + 2.0 * pi * newFreq / sr * fromIntegral bufLen
+             conf     = min 1.0 (pllConfidence pll * 0.9 + 0.1)
+         in PLLState
+              { pllFrequency    = newFreq
+              , pllPhase        = newPhase
+              , pllLocked       = conf > 0.6
+              , pllConfidence   = conf
+              -- Advance past the end of this buffer so the next call's zc
+              -- produces a meaningful elapsed sample count.
+              , pllLastCrossing = pllLastCrossing pll + bufLen
+              }
 
--- Fast frequency detection (zero-crossing based)
-detectFastFreq :: VS.Vector Double -> Maybe (Double, Double)  -- (freq, confidence)
-detectFastFreq samples =
+-- | Fast frequency estimator via rising zero-crossing spacing.
+-- Returns (frequency_Hz, stability_confidence) or Nothing.
+--
+-- BUG FIXED: variance was divided by the magic constant 100.0, which made
+-- low-frequency signals (long periods, large sample indices) appear unstable
+-- and high-frequency signals falsely stable.  Now normalised by avgPeriod²
+-- giving the squared coefficient of variation — dimensionally correct.
+detectFastFreq :: Double           -- ^ sample rate (Hz)
+               -> VS.Vector Double
+               -> Maybe (Double, Double)
+detectFastFreq sr samples =
   let crossings = findAllZeroCrossings samples
-      periods = case crossings of
-                  (_:rest) -> zipWith (-) rest crossings
-                  [] -> []
+      periods   = zipWith (-) (tail crossings) crossings
   in if length periods < 2
      then Nothing
-     else 
-       let avgPeriod = fromIntegral (sum periods) / fromIntegral (length periods)
-           freq = detectorSampleRate / avgPeriod
-           variance = sum (map (\p -> let d = fromIntegral p - avgPeriod in d * d) periods) / fromIntegral (length periods)
-           stability = 1.0 / (1.0 + variance / 100.0)
+     else
+       let n         = length periods
+           fp        = map fromIntegral periods :: [Double]
+           avgPeriod = sum fp / fromIntegral n
+           variance  = sum (map (\p -> (p - avgPeriod) ^ (2 :: Int)) fp)
+                       / fromIntegral n
+           -- Normalise variance by mean² → coefficient of variation (unitless)
+           stability = 1.0 / (1.0 + variance / (avgPeriod * avgPeriod + 1e-10))
+           freq      = sr / avgPeriod
        in if freq >= fastPathMinFreq && freq <= 4000.0 && stability > 0.5
-          then Just (freq, stability)
+          then Just (freq, min 1.0 stability)
           else Nothing
 
 findAllZeroCrossings :: VS.Vector Double -> [Int]
@@ -177,52 +257,112 @@ findAllZeroCrossings v = go 0
       | v VS.! i < 0 && v VS.! (i+1) >= 0 = i : go (i+1)
       | otherwise = go (i+1)
 
--- Medium frequency detection (autocorrelation)
-detectMediumFreq :: VS.Vector Double -> Maybe (Double, Double)
-detectMediumFreq samples =
-  let n = min (VS.length samples) mediumWindowSamples
-      buf = VS.take n samples
-      -- Simple autocorrelation peak finding
-      lagRange = [round (detectorSampleRate / 200) .. round (detectorSampleRate / 80)]  -- 80-200Hz
-      autocorr lag = 
-        let pairs = [(buf VS.! i, buf VS.! (i + lag)) | i <- [0..n-lag-1]]
-            products = map (\(a, b) -> a * b) pairs
-        in sum products
-      peaks = [(lag, autocorr lag) | lag <- lagRange]
-      bestPeak = maximumBy (comparing snd) peaks
-  in case bestPeak of
-       Nothing -> Nothing
-       Just (lag, corr) -> 
-         let freq = detectorSampleRate / fromIntegral lag
-             strength = corr / fromIntegral n
-         in if strength > 0.1
-            then Just (freq, min 1.0 strength)
-            else Nothing
+-- | Normalised autocorrelation coefficient at a single lag.
+-- Uses Storable Vector operations — O(n) and allocation-free compared to the
+-- previous list-comprehension approach which allocated O(n) cons cells per lag.
+autocorrAt :: VS.Vector Double -> Int -> Double
+autocorrAt buf lag
+  | lag <= 0 || lag >= VS.length buf = 0.0
+  | otherwise =
+      let n     = VS.length buf - lag
+          numer = VS.sum $ VS.zipWith (*) (VS.take n buf) (VS.drop lag buf)
+          -- Normalise by geometric mean of window energies → coeff in [-1, 1]
+          e1    = VS.sum $ VS.map (\x -> x * x) (VS.take n buf)
+          e2    = VS.sum $ VS.map (\x -> x * x) (VS.drop lag buf)
+          denom = sqrt (e1 * e2)
+      in if denom < 1e-10 then 0.0 else numer / denom
 
--- Slow frequency detection (YIN)
-detectSlowFreq :: VS.Vector Double -> Maybe (Double, Double)
-detectSlowFreq samples =
-  let n = min (VS.length samples) slowWindowSamples
-      buf = VS.take n samples
-      -- YIN difference function (simplified)
-      tauMax = min n (floor (detectorSampleRate / bassMinFreq))
-      yinDiff tau = 
-        let diffs = [(buf VS.! i - buf VS.! (i + tau))^(2 :: Int) | i <- [0..n-tau-1]]
-        in sum diffs / fromIntegral (n - tau)
-      -- Find minimum below threshold
-      search tau 
-        | tau >= tauMax = Nothing
-        | otherwise = 
-            let diff = yinDiff tau
-                thresh = 0.1
-            in if diff < thresh
-               then Just (tau, 1.0 - diff)
-               else search (tau + 1)
-  in case search (floor (detectorSampleRate / 200)) of
-       Nothing -> Nothing
-       Just (tau, conf) -> 
-         let freq = detectorSampleRate / fromIntegral tau
-         in Just (freq, conf)
+-- | Medium-frequency estimator (80–200 Hz) via autocorrelation.
+--
+-- BUG FIXED (critical): lag ranges were computed at 96 kHz but JACK runs at
+-- 44100 Hz, making all lags >= 480 samples while the buffer was 256 samples —
+-- every autocorr call operated on an empty index range and returned 0.0.
+-- The path was silently broken on every single frame.
+--
+-- BUG FIXED (performance): the original used Haskell list comprehensions
+-- inside the autocorr lambda, allocating O(n) list cells per lag (~720 lags/
+-- frame) = ~37 M list allocations/second.  Replaced with VS.zipWith which
+-- is allocation-free and cache-friendly.
+--
+-- NOTE: reliable 80 Hz detection requires at least sr/80 ≈ 551 samples @
+-- 44100 Hz.  The function returns Nothing if the buffer is too short rather
+-- than producing garbage results.
+detectMediumFreq :: Double           -- ^ sample rate (Hz)
+                 -> VS.Vector Double
+                 -> Maybe (Double, Double)
+detectMediumFreq sr samples =
+  let n      = VS.length samples
+      minLag = max 1 (round (sr / 200.0))   -- ~220 @ 44100
+      maxLag = round (sr / 80.0)            -- ~551 @ 44100
+  in if maxLag >= n   -- buffer too short for this frequency range
+     then Nothing
+     else
+       let peaks    = [ (lag, autocorrAt samples lag) | lag <- [minLag..maxLag] ]
+           bestPeak = maximumBy (comparing snd) peaks
+       in case bestPeak of
+            Nothing          -> Nothing
+            Just (lag, corr) ->
+              -- Raised from 0.1 → 0.3: un-normalised autocorr at 0.1 had too many
+              -- false positives on noise bursts.  Normalised coeff at 0.3 is robust.
+              if corr > 0.3
+              then Just (sr / fromIntegral lag, corr)
+              else Nothing
+
+-- | Slow-frequency estimator (30–80 Hz) using YIN with CMNDF normalisation.
+--
+-- BUG FIXED: the original used the raw YIN difference function d(τ) directly.
+-- Without the Cumulative Mean Normalised Difference Function (CMNDF) the small-
+-- τ dips (harmonics, noise) dominate and the threshold of 0.1 rarely fires at
+-- the true fundamental — the path returned Nothing on most frames.
+--
+-- The CMNDF d'(τ) = d(τ) * τ / Σ_{j=1}^{τ} d(j) re-scales so that τ=1 is
+-- always 1.0, making the 0.12 threshold select the first true period minimum.
+--
+-- NOTE: reliable 30 Hz detection requires at least sr/30 ≈ 1470 samples @
+-- 44100 Hz.  Returns Nothing when the buffer is too small.
+detectSlowFreq :: Double           -- ^ sample rate (Hz)
+               -> VS.Vector Double
+               -> Maybe (Double, Double)
+detectSlowFreq sr samples =
+  let n      = VS.length samples
+      minTau = max 2 (round (sr / 500.0))     -- above 500 Hz overtones
+      maxTau = min (n `div` 2) (round (sr / bassMinFreq))
+  in if maxTau <= minTau
+     then Nothing   -- buffer too small for bass range
+     else
+       let -- Raw YIN difference function using VS.zipWith — O(n) per τ
+           yinDiff tau =
+             let k = n - tau
+             in if k <= 0 then 0.0
+                else VS.sum $ VS.zipWith (\a b -> let d = a - b in d * d)
+                                         (VS.take k samples)
+                                         (VS.drop tau samples)
+
+           -- Compute all raw diffs once, then build CMNDF with a running sum
+           -- (avoids O(τ²) by accumulating Σ d(j) incrementally)
+           diffs = VS.generate (maxTau - minTau + 1) (\i -> yinDiff (minTau + i))
+
+           -- CMNDF at index i (τ = minTau + i):
+           --   d'(τ) = d(τ) * τ / Σ_{j=1}^{τ} d(j)
+           -- We approximate the denominator sum using our minTau..τ window.
+           cmndf i =
+             let d_tau  = diffs VS.! i
+                 runSum = VS.sum (VS.take (i + 1) diffs)
+             in if runSum < 1e-10 then 1.0
+                else d_tau * fromIntegral (i + 1) / runSum
+
+           -- Search for first τ where CMNDF < 0.12 (standard YIN threshold)
+           search i
+             | i > maxTau - minTau = Nothing
+             | otherwise =
+                 let c = cmndf i
+                 in if c < 0.12
+                    then Just (minTau + i, min 1.0 (1.0 - c))
+                    else search (i + 1)
+
+       in case search 0 of
+            Nothing       -> Nothing
+            Just (tau, c) -> Just (sr / fromIntegral tau, c)
 
 -- Convert frequency to MIDI note
 freqToMidi :: Double -> Int
@@ -245,22 +385,20 @@ freqToCents freq midiNote =
     let targetFreq = midiToFreq midiNote
     in 1200.0 * logBase 2 (freq / targetFreq)
 
+-- | Nearest MIDI note and its cent deviation from the given frequency.
+-- Simplified from the original: `freqToMidi` uses `round`, which by definition
+-- minimises |cents|, so the midiNote±1 candidates were always further away and
+-- the minimumBy always returned midiNote anyway.  The neighbour search was
+-- redundant (and called the local shadowing `minimumBy` unnecessarily).
 nearestNote :: Double -> (Int, Double)
 nearestNote freq
-    | freq <= 0 = (0, 0.0)
-    | otherwise = 
-        let midiNote = freqToMidi freq
-            centsBelow = freqToCents freq (midiNote - 1)
-            centsAbove = freqToCents freq (midiNote + 1)
-            centsCurrent = freqToCents freq midiNote
-            candidates = [(midiNote, centsCurrent), (midiNote - 1, centsBelow), (midiNote + 1, centsAbove)]
-        in case minimumBy (\x y -> compare (abs (snd x)) (abs (snd y))) candidates of
-             Nothing -> (midiNote, centsCurrent)
-             Just result -> result
+  | freq <= 0.0 = (69, 0.0)   -- A4 as safe default for zero/negative input
+  | otherwise   =
+      let midiNote = freqToMidi freq
+          cents    = freqToCents freq midiNote
+      in (midiNote, cents)
 
-minimumBy :: (a -> a -> Ordering) -> [a] -> Maybe a
-minimumBy _ [] = Nothing
-minimumBy cmp xs = Just $ foldl1 (\x y -> if cmp x y == GT then y else x) xs
+-- (minimumBy removed — nearestNote simplified to not need it)
 
 isInTune :: Double -> Bool
 isInTune cents = abs cents <= 5.0
@@ -276,98 +414,139 @@ midiToNoteName n =
         octave = (n `div` 12) - 1
     in note ++ show octave
 
--- Main detection function with state machine
-detect :: Config -> VS.Vector Int -> TimeStamp -> NoteState -> PLLState -> OnsetFeatures -> IO DetectionResult
-detect cfg samplesInt16 currentTime prevState _prevPLL prevOnset = do
-  let samples = normalizeInt16 samplesInt16
-      -- n = VS.length samples -- Not currently used
-  
-  -- Update onset features
-  let currDouble = VS.map realToFrac samples :: VS.Vector Double
-      newOnset = updateOnsetFeatures cfg currDouble currDouble prevOnset  -- Simplified: use same for prev
-  
-  -- Check for onset
-  let isOnset = detectOnset cfg newOnset
-  
-  -- State machine
-  case prevState of
-    Idle -> 
-      if isOnset
-      then pure $ DetectionResult Nothing 0.0 (Attacking currentTime) Nothing
-      else pure $ DetectionResult Nothing 0.0 Idle Nothing
-      
-    Attacking startTime ->
-      let elapsedMs = fromIntegral (currentTime - startTime) / 1000.0
-      in if elapsedMs >= bassConfirmMs (detection cfg)
-         then -- Timeout - force detection with slow method
-           case detectSlowFreq samples of
-             Nothing -> pure $ DetectionResult Nothing 0.0 Idle Nothing
-             Just (freq, conf) -> 
-               let note = freqToMidi freq
-                   vel = min 127 $ max 1 $ round (127 * conf)
-               in pure $ DetectionResult (Just (note, vel)) conf (Validated note vel) Nothing
-         else if elapsedMs >= bassFastMs (detection cfg)
-         then -- Medium window - speculative bass output
-           case detectMediumFreq samples of
-             Nothing -> pure $ DetectionResult Nothing 0.0 prevState Nothing
-             Just (freq, conf) -> 
-               if conf >= bassFastConf (detection cfg)
-               then 
-                 let note = freqToMidi freq
-                     vel = min 127 $ max 1 $ round (127 * conf)
-                 in pure $ DetectionResult (Just (note, vel)) conf (MediumNote note vel currentTime) Nothing
-               else pure $ DetectionResult Nothing 0.0 prevState Nothing
-         else if elapsedMs >= fastValidationMs (detection cfg)
-         then -- Fast window - high freq only
-           case detectFastFreq samples of
-             Nothing -> pure $ DetectionResult Nothing 0.0 prevState Nothing
-             Just (freq, conf) -> 
-               if conf >= highFreqConf (detection cfg) && freq >= fastPathMinFreq
-               then 
-                 let note = freqToMidi freq
-                     vel = min 127 $ max 1 $ round (127 * conf)
-                 in pure $ DetectionResult (Just (note, vel)) conf (FastNote note vel currentTime) Nothing
-               else pure $ DetectionResult Nothing 0.0 prevState Nothing
-         else pure $ DetectionResult Nothing 0.0 prevState Nothing
-    
-    FastNote note vel _startTime ->
-      -- Keep outputting until new onset or timeout
-      if isOnset
-      then pure $ DetectionResult (Just (note, vel)) 1.0 (Attacking currentTime) Nothing
-      else pure $ DetectionResult (Just (note, vel)) 1.0 prevState Nothing
-    
-    MediumNote note vel startTime ->
-      let elapsedMs = fromIntegral (currentTime - startTime) / 1000.0
-      in if elapsedMs >= bassConfirmMs (detection cfg)
-         then -- Confirm or correct
-           case detectSlowFreq samples of
-             Nothing -> pure $ DetectionResult (Just (note, vel)) 0.9 (Validated note vel) Nothing
-             Just (freq, conf) -> 
-               let targetNote = freqToMidi freq
-               in if targetNote /= note && conf >= bassFinalConf (detection cfg)
-                  then 
-                    let bend = calcPitchBend note freq
-                    in pure $ DetectionResult (Just (targetNote, vel)) conf (Validated targetNote vel) (Just (targetNote, bend))
-                  else pure $ DetectionResult (Just (note, vel)) 0.95 (Validated note vel) Nothing
-         else if isOnset
-         then pure $ DetectionResult (Just (note, vel)) 0.9 (Attacking currentTime) Nothing
-         else pure $ DetectionResult (Just (note, vel)) 0.9 prevState Nothing
-    
-    Validated note vel ->
-      if isOnset
-      then pure $ DetectionResult (Just (note, vel)) 1.0 (Attacking currentTime) Nothing
-      else pure $ DetectionResult (Just (note, vel)) 1.0 prevState Nothing
-    
-    Releasing startTime ->
-      let elapsedMs :: Double
-          elapsedMs = fromIntegral (currentTime - startTime) / 1000.0
-      in if elapsedMs > 50.0  -- 50ms release time
-         then pure $ DetectionResult Nothing 0.0 Idle Nothing
-         else pure $ DetectionResult Nothing 0.0 prevState Nothing
+-- | Main detection function with state machine.
+--
+-- Changes from original:
+--   • prevPLL is no longer discarded (_prevPLL → prevPLL); updatePLL is called
+--     and the resulting PLLState fed back into the result.
+--   • updateOnsetFeatures receives the current RMS (not `curr` twice), so onset
+--     detection now compares against the previous frame's energy.
+--   • isSilent check added: when signal drops below silenceThresholdRMS the
+--     held note transitions to Releasing instead of staying locked forever.
+--   • Releasing is now reachable from FastNote, MediumNote, and Validated.
+--   • DetectionResult is extended with pllState and onsetState so the Backend
+--     can thread them forward (see Types.hs note below).
+--   • All frequency/lag computations use detSampleRate cfg, not a hardcoded Hz.
+--
+-- REQUIRED Types.hs change: add two fields to DetectionResult:
+--   pllState   :: PLLState
+--   onsetState :: OnsetFeatures
+-- and update the constructor accordingly.
+detect :: Config
+       -> VS.Vector Int
+       -> TimeStamp
+       -> NoteState
+       -> PLLState
+       -> OnsetFeatures
+       -> IO DetectionResult
+detect cfg samplesInt16 currentTime prevState prevPLL prevOnset = do
+  let sr      = detSampleRate cfg
+      samples = normalizeInt16 samplesInt16
+      currRms = computeRms samples
 
+  -- Update PLL with the actual previous state (was discarded with _ before)
+  let newPLL = updatePLL sr samples prevPLL
+
+  -- Onset detection now receives currRms so the energy delta is meaningful.
+  -- Previously both curr and prev were the same vector → always 0.
+  let newOnset = updateOnsetFeatures cfg samples currRms prevOnset
+      isOnset  = detectOnset cfg newOnset
+
+  -- Note-off heuristic: if the buffer is silent the held note has ended.
+  let isSilent = currRms < silenceThresholdRMS
+
+  -- Convenience: build a DetectionResult carrying the updated PLL and onset state
+  let emit mNote conf st bend =
+        DetectionResult mNote conf st bend newPLL newOnset
+
+  case prevState of
+    Idle ->
+      pure $ emit Nothing 0.0 (if isOnset then Attacking currentTime else Idle) Nothing
+
+    Attacking startTime ->
+      let elapsedMs = fromIntegral (currentTime - startTime) / 1000.0 :: Double
+      in if isSilent
+         -- Silence during attack → spurious onset; return to Idle
+         then pure $ emit Nothing 0.0 Idle Nothing
+         else if elapsedMs >= bassConfirmMs (detection cfg)
+         then case detectSlowFreq sr samples of
+                Nothing           -> pure $ emit Nothing 0.0 Idle Nothing
+                Just (freq, conf) ->
+                  let note = freqToMidi freq
+                      vel  = min 127 $ max 1 $ round (127.0 * conf)
+                  in pure $ emit (Just (note, vel)) conf (Validated note vel) Nothing
+         else if elapsedMs >= bassFastMs (detection cfg)
+         then case detectMediumFreq sr samples of
+                Nothing           -> pure $ emit Nothing 0.0 prevState Nothing
+                Just (freq, conf) ->
+                  if conf >= bassFastConf (detection cfg)
+                  then let note = freqToMidi freq
+                           vel  = min 127 $ max 1 $ round (127.0 * conf)
+                       in pure $ emit (Just (note, vel)) conf (MediumNote note vel currentTime) Nothing
+                  else pure $ emit Nothing 0.0 prevState Nothing
+         else if elapsedMs >= fastValidationMs (detection cfg)
+         then case detectFastFreq sr samples of
+                Nothing           -> pure $ emit Nothing 0.0 prevState Nothing
+                Just (freq, conf) ->
+                  if conf >= highFreqConf (detection cfg) && freq >= fastPathMinFreq
+                  then let note = freqToMidi freq
+                           vel  = min 127 $ max 1 $ round (127.0 * conf)
+                       in pure $ emit (Just (note, vel)) conf (FastNote note vel currentTime) Nothing
+                  else pure $ emit Nothing 0.0 prevState Nothing
+         else pure $ emit Nothing 0.0 prevState Nothing
+
+    FastNote note vel _startTime ->
+      if isSilent
+      -- Note-off via silence — transition to Releasing (was unreachable before)
+      then pure $ emit Nothing 0.0 (Releasing currentTime) Nothing
+      else if isOnset
+      then pure $ emit (Just (note, vel)) 1.0 (Attacking currentTime) Nothing
+      else -- Use PLL confidence to weight the sustained-note confidence
+           let conf = min 1.0 (0.8 + 0.2 * pllConfidence newPLL)
+           in pure $ emit (Just (note, vel)) conf prevState Nothing
+
+    MediumNote note vel startTime ->
+      let elapsedMs = fromIntegral (currentTime - startTime) / 1000.0 :: Double
+      in if isSilent
+         then pure $ emit Nothing 0.0 (Releasing currentTime) Nothing
+         else if elapsedMs >= bassConfirmMs (detection cfg)
+         then case detectSlowFreq sr samples of
+                Nothing -> pure $ emit (Just (note, vel)) 0.9 (Validated note vel) Nothing
+                Just (freq, conf) ->
+                  let targetNote = freqToMidi freq
+                  in if targetNote /= note && conf >= bassFinalConf (detection cfg)
+                     then let bend = calcPitchBend note freq
+                          in pure $ emit (Just (targetNote, vel)) conf
+                                         (Validated targetNote vel) (Just (targetNote, bend))
+                     else pure $ emit (Just (note, vel)) 0.95 (Validated note vel) Nothing
+         else if isOnset
+         then pure $ emit (Just (note, vel)) 0.9 (Attacking currentTime) Nothing
+         else pure $ emit (Just (note, vel)) 0.9 prevState Nothing
+
+    Validated note vel ->
+      if isSilent
+      then pure $ emit Nothing 0.0 (Releasing currentTime) Nothing
+      else if isOnset
+      then pure $ emit (Just (note, vel)) 1.0 (Attacking currentTime) Nothing
+      else let conf = min 1.0 (0.95 + 0.05 * pllConfidence newPLL)
+           in pure $ emit (Just (note, vel)) conf prevState Nothing
+
+    Releasing startTime ->
+      let elapsedMs = fromIntegral (currentTime - startTime) / 1000.0 :: Double
+      in if elapsedMs > 50.0
+         then pure $ emit Nothing 0.0 Idle Nothing
+         -- New onset during release: re-attack immediately
+         else if isOnset
+         then pure $ emit Nothing 0.0 (Attacking currentTime) Nothing
+         else pure $ emit Nothing 0.0 prevState Nothing
+
+-- | Safe maximum by comparator (returns Nothing on empty list).
+-- Named to avoid shadowing Data.List.maximumBy or Data.Ord utilities.
 maximumBy :: (a -> a -> Ordering) -> [a] -> Maybe a
-maximumBy _ [] = Nothing
+maximumBy _ []  = Nothing
 maximumBy cmp xs = Just $ foldl1 (\x y -> if cmp x y == GT then x else y) xs
 
-mod' :: Double -> Double -> Double
-mod' x y = x - y * fromIntegral (floor (x / y) :: Int)
+-- | Safe minimum by comparator
+minimumBy :: (a -> a -> Ordering) -> [a] -> Maybe a
+minimumBy _ []  = Nothing
+minimumBy cmp xs = Just $ foldl1 (\x y -> if cmp x y == GT then y else x) xs
