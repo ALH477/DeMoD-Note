@@ -682,9 +682,9 @@ pressEnterWidget state =
             JackReconnecting ->
                 ( if blinkOn then jackWarnAttr else dimAttr
                 , "◐   R E C O N N E C T I N G …" )
-            JackError msg   ->
+            JackError errMsg   ->
                 ( if blinkOn then jackBadAttr else dimAttr
-                , "○   J A C K   E R R O R   ─   " ++ take 20 msg )
+                , "○   J A C K   E R R O R   ─   " ++ take 20 errMsg )
             JackDisconnected ->
                 ( dimAttr
                 , "      W A I T I N G   F O R   J A C K      " )

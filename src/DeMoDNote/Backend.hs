@@ -17,7 +17,8 @@ import DeMoDNote.Types
 import DeMoDNote.Config hiding (sampleRate, bufferSize)
 import DeMoDNote.Detector
 import DeMoDNote.OSC
-import DeMoDNote.SoundFont (SoundFontManager, isFluidSynthRunning)
+import DeMoDNote.SoundFont (SoundFontManager, isFluidSynthRunning, stopFluidSynth)
+import DeMoDNote.Recording (RecordingState, recordEvent, EventType(..))
 
 import qualified Sound.JACK as JACK
 import qualified Sound.JACK.Audio as JAudio
@@ -36,6 +37,8 @@ import Foreign.Storable (sizeOf, peekElemOff)
 import Control.Concurrent (threadDelay, forkIO, MVar, newEmptyMVar, tryTakeMVar, tryPutMVar)
 import Control.Concurrent.STM
 import Control.Exception (try, SomeException, catch, Exception)
+-- Note: DeMoDNote.Error provides typed error handling (DeMoDError).
+-- Consider migrating SomeException usage to typed errors for better error handling.
 import Control.Monad (forM, forM_, when, unless, forever)
 import Data.Int (Int16)
 import Data.IORef
@@ -500,11 +503,19 @@ runBackend cfg state mSynthManager = do
     _ <- installHandler sigINT (Catch $ do
         atomically $ writeTVar (running audioState) False
         writeIORef (jsShouldReconnect jackState) False
-        logInfo "SIGINT received, shutting down...") Nothing
+        logInfo "SIGINT received, shutting down..."
+        case mSynthManager of
+            Nothing -> return ()
+            Just sm -> void $ try @SomeException $ stopFluidSynth sm
+        ) Nothing
     _ <- installHandler sigTERM (Catch $ do
         atomically $ writeTVar (running audioState) False  
         writeIORef (jsShouldReconnect jackState) False
-        logInfo "SIGTERM received, shutting down...") Nothing
+        logInfo "SIGTERM received, shutting down..."
+        case mSynthManager of
+            Nothing -> return ()
+            Just sm -> void $ try @SomeException $ stopFluidSynth sm
+        ) Nothing
     
     forkIO $ jackLoop cfg audioState jackState state
     

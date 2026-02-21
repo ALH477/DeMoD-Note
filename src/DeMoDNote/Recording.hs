@@ -135,18 +135,19 @@ getTimestamp ut = floor $ utcTimeToPOSIXSeconds ut * 1000000
 
 recordEvent :: RecordingState -> EventType -> Int -> Int -> Float -> Float -> IO RecordingState
 recordEvent rec et note vel conf tc = do
-    when (recEnabled rec) $ do
-        now <- getCurrentTime
-        let evt = RecordedEvent
-                { timestamp = getTimestamp now - getTimestamp (recStartTime rec)
-                , eventType = et
-                , note = fromIntegral note
-                , velocity = fromIntegral vel
-                , confidence = conf
-                , tuningCents = tc
-                }
-        return ()
-    return rec
+    if recEnabled rec
+        then do
+            now <- getCurrentTime
+            let evt = RecordedEvent 
+                    { timestamp = getTimestamp now - getTimestamp (recStartTime rec)
+                    , eventType = et
+                    , note = fromIntegral note
+                    , velocity = fromIntegral vel
+                    , confidence = conf
+                    , tuningCents = tc
+                    }
+            return rec { recEvents = evt : recEvents rec }
+        else return rec
 
 flushRecording :: RecordingState -> FilePath -> IO ()
 flushRecording rec path = do

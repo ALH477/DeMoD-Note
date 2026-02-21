@@ -119,7 +119,7 @@ presentsLength = length presentsText
 
 -- Dynamic width — no hardcoded magic numbers
 presentsWidth :: Int
-presentsWidth = maximum (map length presentsLines)
+presentsWidth = if null presentsLines then 0 else maximum (map length presentsLines)
 
 -- ────────────────────────────────────────────────────────────────
 -- "Astart" banner
