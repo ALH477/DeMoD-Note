@@ -170,6 +170,17 @@
           jack-tests = jackIntegrationTests;
           osc-tests = oscIntegrationTests;
         };
+
+        apps = {
+          default = {
+            type = "app";
+            program = "${demod-note}/bin/demod-note";
+          };
+          demod = {
+            type = "app";
+            program = "${demod-note}/bin/demod";
+          };
+        };
         
         # Add checks for CI/CD integration
         checks = {

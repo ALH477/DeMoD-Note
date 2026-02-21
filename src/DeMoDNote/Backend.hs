@@ -9,7 +9,8 @@ module DeMoDNote.Backend (
     runBackend,
     runBackendSimple,
     JackState(..),
-    newJackState
+    newJackState,
+    cfloatToInt16
 ) where
 
 import DeMoDNote.Types
@@ -41,7 +42,7 @@ import Data.Word (Word64)
 import System.CPUTime (getCPUTime)
 import System.IO (hFlush, hPutStrLn, stderr, stdout)
 import System.Posix.Signals (installHandler, sigINT, sigTERM, Handler(..))
-import System.Process (callCommand, readProcess)
+import System.Process (spawnProcess, waitForProcess, readProcess)
 
 -------------------------------------------------------------------------------
 -- Logging
@@ -119,9 +120,12 @@ isJACKRunning = do
 startJACKServer :: IO Bool
 startJACKServer = do
     putStrLn "Attempting to start JACK server..."
-    result <- try (callCommand "jackd -d dummy -r 44100 -p 256 -n 2 2>/dev/null &") :: IO (Either SomeException ())
+    result <- try $ do
+        ph <- spawnProcess "jackd" ["-d", "dummy", "-r", "44100", "-p", "256", "-n", "2"]
+        _ <- waitForProcess ph
+        return ()
     case result of
-        Left e  -> logErr ("Failed: " ++ show e) >> return False
+        Left e  -> logErr ("Failed: " ++ show (e :: SomeException)) >> return False
         Right _ -> do
             threadDelay 3000000
             ok <- isJACKRunning

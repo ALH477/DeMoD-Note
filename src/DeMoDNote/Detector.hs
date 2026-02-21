@@ -177,9 +177,7 @@ detectMediumFreq samples =
             products = map (\(a, b) -> a * b) pairs
         in sum products
       peaks = [(lag, autocorr lag) | lag <- lagRange]
-      bestPeak = case peaks of
-        [] -> Nothing
-        ps -> Just $ maximumBy (comparing snd) ps
+      bestPeak = maximumBy (comparing snd) peaks
   in case bestPeak of
        Nothing -> Nothing
        Just (lag, corr) -> 
@@ -243,12 +241,14 @@ nearestNote freq
             centsBelow = freqToCents freq (midiNote - 1)
             centsAbove = freqToCents freq (midiNote + 1)
             centsCurrent = freqToCents freq midiNote
-            (closestNote, closestCents) = minimumBy (\x y -> compare (abs (snd x)) (abs (snd y))) 
-                [(midiNote, centsCurrent), (midiNote - 1, centsBelow), (midiNote + 1, centsAbove)]
-        in (closestNote, closestCents)
+            candidates = [(midiNote, centsCurrent), (midiNote - 1, centsBelow), (midiNote + 1, centsAbove)]
+        in case minimumBy (\x y -> compare (abs (snd x)) (abs (snd y))) candidates of
+             Nothing -> (midiNote, centsCurrent)
+             Just result -> result
 
-minimumBy :: (a -> a -> Ordering) -> [a] -> a
-minimumBy cmp = foldl1 (\x y -> if cmp x y == GT then y else x)
+minimumBy :: (a -> a -> Ordering) -> [a] -> Maybe a
+minimumBy _ [] = Nothing
+minimumBy cmp xs = Just $ foldl1 (\x y -> if cmp x y == GT then y else x) xs
 
 isInTune :: Double -> Bool
 isInTune cents = abs cents <= 5.0
@@ -353,9 +353,9 @@ detect cfg samplesInt16 currentTime prevState _prevPLL prevOnset = do
          then pure $ DetectionResult Nothing 0.0 Idle Nothing
          else pure $ DetectionResult Nothing 0.0 prevState Nothing
 
--- Utility
-maximumBy :: (a -> a -> Ordering) -> [a] -> a
-maximumBy cmp = foldl1 (\x y -> if cmp x y == GT then x else y)
+maximumBy :: (a -> a -> Ordering) -> [a] -> Maybe a
+maximumBy _ [] = Nothing
+maximumBy cmp xs = Just $ foldl1 (\x y -> if cmp x y == GT then x else y) xs
 
 mod' :: Double -> Double -> Double
 mod' x y = x - y * fromIntegral (floor (x / y) :: Int)

@@ -31,9 +31,9 @@ module DeMoDNote.Scale (
 data NoteName = C | Cs | D | Ds | E | F | Fs | G | Gs | A | As | B
     deriving (Eq, Show, Enum, Ord)
 
--- Safe list indexing with default value
 safeIndex :: [a] -> Int -> a -> a
 safeIndex [] _ def = def
+safeIndex _ n def | n < 0 = def
 safeIndex (x:_) 0 _ = x
 safeIndex (_:xs) n def = safeIndex xs (n - 1) def
 
