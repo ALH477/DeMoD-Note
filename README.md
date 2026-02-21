@@ -44,12 +44,12 @@ DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor wr
 | Attribute | Value |
 |-----------|-------|
 | **Language** | Haskell (GHC 9.10+) |
-| **Source Code** | 3,639 LOC |
+| **Source Code** | 12,302 LOC |
 | **Test Code** | 480 LOC |
-| **Total Code** | 4,119 LOC |
-| **Source Modules** | 12 |
+| **Total Code** | 12,782 LOC |
+| **Source Modules** | 14 |
 | **Test Modules** | 8 |
-| **Build Dependencies** | 27 packages |
+| **Build Dependencies** | 52 packages |
 | **Test Suite** | **142 tests** (HSpec + QuickCheck) |
 | **License** | MIT |
 | **Version** | 1.0.0 |
@@ -65,12 +65,12 @@ nix run . -- --help
 Start with JACK (PipeWire on modern Linux):
 ```bash
 # Using nix (recommended)
-nix run . -- -- run
+nix run . -- run
 
 # Or with TUI
-nix run . -- -- run -i
+nix run . -- run -i
 # or
-nix run . -- -- tui
+nix run . -- tui
 ```
 
 Connect your audio source to `DeMoDNote:input` and `DeMoDNote:output` to your speakers/recorder.
@@ -364,17 +364,19 @@ Key settings in `config.toml`:
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
-| TUI | 652 | Terminal UI with Brick |
+| TUI | 1414 | Terminal UI with Brick |
+| Opengl | 1248 | OpenGL visualization (optional) |
+| Backend | 507 | JACK audio + OSC handling |
+| DeMoD | 369 | Main application entry point |
 | Detector | 361 | Triple-path pitch detection |
 | Preset | 357 | Preset management |
-| Backend | 353 | JACK audio + OSC handling |
-| Arpeggio | 338 | Chord/note patterns |
+| OSC | 312 | OSC control server |
 | BPM | 327 | Tempo/time utilities |
+| Arpeggio | 338 | Chord/note patterns |
 | Scale | 302 | Musical scales |
-| SoundFont | 280 | FluidSynth integration |
-| OSC | 199 | OSC control server |
+| SoundFont | 290 | FluidSynth integration |
 | Config | 168 | TOML parsing |
-| Types | 121 | Core type definitions |
+| Types | 144 | Core type definitions |
 | Monitor | 14 | Web dashboard |
 
 ### Test Coverage
