@@ -3,6 +3,14 @@ module DeMoDNote.Types where
 import DeMoDNote.Config
 import Data.Word (Word64)
 
+-- JACK connection status - shared between Backend and TUI
+data JackStatus
+    = JackConnected
+    | JackDisconnected
+    | JackReconnecting
+    | JackError String
+    deriving (Show, Eq)
+
 type MIDINote = Int
 type Velocity = Int
 type TimeStamp = Word64  -- Microseconds since epoch
@@ -63,14 +71,22 @@ defaultTuningState = TuningState
   }
 
 data ReactorState = ReactorState
-  { currentNotes    :: [(MIDINote, Velocity)]
-  , noteStateMach   :: !NoteState
-  , pllStateMach    :: !PLLState
-  , onsetFeatures   :: !OnsetFeatures
-  , lastOnsetTime   :: !TimeStamp
-  , config          :: !Config
-  , reactorBPM      :: !Double
-  , reactorThreshold :: !Double
+  { currentNotes       :: [(MIDINote, Velocity)]
+  , noteStateMach      :: !NoteState
+  , pllStateMach       :: !PLLState
+  , onsetFeatures      :: !OnsetFeatures
+  , lastOnsetTime      :: !TimeStamp
+  , config             :: !Config
+  , reactorBPM         :: !Double
+  , reactorThreshold   :: !Double
+  -- New fields for TUI integration
+  , jackStatus         :: !JackStatus
+  , detectionConfidence :: !Double
+  , detectionLatency   :: !Double
+  , latestWaveform     :: ![Double]
+  , detectedTuningNote :: !(Maybe Int)
+  , detectedTuningCents :: !Double
+  , detectedTuningInTune :: !Bool
   } deriving (Show)
 
 emptyReactorState :: Config -> ReactorState
@@ -83,6 +99,13 @@ emptyReactorState cfg = ReactorState
   , config = cfg
   , reactorBPM = 120.0
   , reactorThreshold = -40.0
+  , jackStatus = JackDisconnected
+  , detectionConfidence = 0.0
+  , detectionLatency = 0.0
+  , latestWaveform = []
+  , detectedTuningNote = Nothing
+  , detectedTuningCents = 0.0
+  , detectedTuningInTune = False
   }
 
 -- MIDI Event with timing

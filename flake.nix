@@ -11,8 +11,27 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         
-        # Build the package with tests enabled
-        demod-note = pkgs.haskellPackages.callCabal2nix "DeMoD-Note" self {};
+        # Use default haskellPackages - OpenGL support disabled by default
+        # Enable with: cabal build -f opengl (requires compatible dependencies)
+        hp = pkgs.haskellPackages;
+        
+        # OpenGL-enabled build (use when dear-imgui/nanovg are fixed upstream)
+        hpWithOpenGL = pkgs.haskellPackages.override {
+          overrides = self: super: {
+            dear-imgui = pkgs.haskell.lib.markUnbroken super.dear-imgui;
+            dear-imgui-glfw = pkgs.haskell.lib.markUnbroken super.dear-imgui-glfw;
+            dear-imgui-opengl3 = pkgs.haskell.lib.markUnbroken super.dear-imgui-opengl3;
+            nanovg = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.markUnbroken super.nanovg);
+            GLFW-b = pkgs.haskell.lib.markUnbroken super.GLFW-b;
+          };
+        };
+        
+        # Build the package without OpenGL (default - works on all systems)
+        demod-note = hp.callCabal2nix "DeMoD-Note" self {};
+        
+        # Build with OpenGL support (requires compatible dear-imgui/nanovg)
+        # Use: nix build .#demod-note-opengl
+        demod-note-opengl = hpWithOpenGL.callCabal2nix "DeMoD-Note" self {};
         
         # Run tests and return results
         runTests = pkgs.runCommand "demod-note-test-runner" {
@@ -208,6 +227,10 @@
             hp.hspec
             hp.QuickCheck
             hp.quickcheck-instances
+            # OpenGL development packages
+            glfw
+            libGL
+            libGLU
           ];
           shellHook = ''
             export FLUID_SOUNDFONT="${pkgs.soundfont-fluid}/share/soundfonts/FluidR3_GM.sf2"

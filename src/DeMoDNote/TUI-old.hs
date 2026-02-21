@@ -1,5 +1,3 @@
-{-# LANGUAGE NumericUnderscores #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 module DeMoDNote.TUI where
 
 import Brick hiding (clamp)
@@ -12,48 +10,16 @@ import Graphics.Vty.CrossPlatform (mkVty)
 import Graphics.Vty.Config (defaultConfig)
 import Control.Concurrent (Chan, forkIO, readChan, threadDelay)
 import Control.Concurrent.STM (atomically, readTVar, TVar)
-import Control.Exception (SomeException, catch)
 import Control.Monad (forever, void, when)
+import qualified System.Process as System.Process
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Data.IORef (newIORef, readIORef, writeIORef)
-import System.Process (spawnCommand)
 import Data.List (intercalate, intersperse)
 import Data.Time.Clock
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import DeMoDNote.Types
 import DeMoDNote.Config hiding (defaultConfig)
 import DeMoDNote.Backend (DetectionEvent(..), JackStatus(..))
-
--- ─────────────────────────────────────────────────────────────────────────────
--- Configuration constants
--- ─────────────────────────────────────────────────────────────────────────────
-
--- | Tick thread interval.  Drives animations at ~3.6 Hz.
-tickIntervalUs :: Int
-tickIntervalUs = 280_000
-
--- | BChan capacity.  Large enough to absorb a burst; small enough that
---   back-pressure is felt before memory balloons.
-bChanCapacity :: Int
-bChanCapacity = 100
-
--- | Number of ticks before a transient status message reverts to idle.
---   At 3.6 Hz, 12 ticks ≈ 3.3 seconds.
-statusExpiryTicks :: Int
-statusExpiryTicks = 12
-
--- | Maximum tap-tempo samples retained.
-maxTapSamples :: Int
-maxTapSamples = 8
-
--- | Waveform sample buffer length fed to the oscilloscope.
-waveformSamples :: Int
-waveformSamples = 64
-
--- | Maximum note-history entries shown in the history row.
-maxNoteHistory :: Int
-maxNoteHistory = 10
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Utilities
@@ -109,33 +75,27 @@ data ColorPalette
 allPalettes :: [ColorPalette]
 allPalettes = [minBound .. maxBound]
 
--- Single source of truth: (constructor, display name, keyboard shortcut).
--- Adding a palette here is the only edit required — name/key/parse all derive.
-paletteRegistry :: [(ColorPalette, String, Char)]
-paletteRegistry =
-    [ (Synthwave, "Synthwave", '1')
-    , (Sunset,    "Sunset",    '2')
-    , (Matrix,    "Matrix",    '3')
-    , (Ice,       "Ice",       '4')
-    , (Amber,     "Amber",     '5')
-    ]
-
 paletteName :: ColorPalette -> String
-paletteName p =
-    case [ n | (p', n, _) <- paletteRegistry, p' == p ] of
-        (n:_) -> n
-        []    -> error $ "paletteName: palette not in registry (add it to paletteRegistry)"
+paletteName Synthwave = "Synthwave"
+paletteName Sunset    = "Sunset"
+paletteName Matrix    = "Matrix"
+paletteName Ice       = "Ice"
+paletteName Amber     = "Amber"
 
 paletteKey :: ColorPalette -> Char
-paletteKey p =
-    case [ k | (p', _, k) <- paletteRegistry, p' == p ] of
-        (k:_) -> k
-        []    -> error $ "paletteKey: palette not in registry (add it to paletteRegistry)"
+paletteKey Synthwave = '1'
+paletteKey Sunset    = '2'
+paletteKey Matrix    = '3'
+paletteKey Ice       = '4'
+paletteKey Amber     = '5'
 
 paletteFromChar :: Char -> Maybe ColorPalette
-paletteFromChar c = case [ p | (p, _, k) <- paletteRegistry, k == c ] of
-    (p:_) -> Just p
-    []    -> Nothing
+paletteFromChar '1' = Just Synthwave
+paletteFromChar '2' = Just Sunset
+paletteFromChar '3' = Just Matrix
+paletteFromChar '4' = Just Ice
+paletteFromChar '5' = Just Amber
+paletteFromChar _   = Nothing
 
 -- Dynamic attr map: called on every render with the current state.
 paletteMap :: ColorPalette -> AttrMap
@@ -303,12 +263,6 @@ jackGuide =
     ]
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Domain type aliases (local NoteEvent for TUI)
--- ─────────────────────────────────────────────────────────────────────────────
-
-type NoteEvent = (MIDINote, Velocity)
-
--- ─────────────────────────────────────────────────────────────────────────────
 -- TUI mode
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -332,8 +286,8 @@ data TUIState = TUIState
     -- ── audio / detection ─────────────────────────────────────────────────
     , tuiBPM           :: Double
     , tuiTapTimes      :: [UTCTime]
-    , tuiLastNote      :: Maybe NoteEvent   -- (midiNote, velocity 0–127)
-    , tuiNoteHistory   :: [NoteEvent]
+    , tuiLastNote      :: Maybe (Int, Int)  -- (midiNote, velocity 0–127)
+    , tuiNoteHistory   :: [(Int, Int)]
     , tuiConfidence    :: Double            -- 0.0 – 1.0
     , tuiLatency       :: Double            -- milliseconds
     , tuiWaveform      :: [Double]          -- 64 samples, -1.0 – 1.0
@@ -341,21 +295,15 @@ data TUIState = TUIState
     , tuiScaleIndex    :: Int
     , tuiArpeggioIndex :: Int
     -- ── misc ──────────────────────────────────────────────────────────────
-    , tuiRunning        :: Bool
-    , tuiStatusMessage  :: String
-    , tuiStatusExpiry   :: Maybe Int        -- tick at which status reverts to idle
-    , tuiTuningMode     :: Bool
-    , tuiTuningNote     :: Maybe Int
-    , tuiTuningCents    :: Double           -- -50.0 – 50.0
-    , tuiTuningInTune   :: Bool
-    , tuiJackStatus     :: JackStatus
-    -- ── feedback ──────────────────────────────────────────────────────────
-    , tuiNoteFlash      :: Int              -- ticks remaining for hero border flash
-    , tuiPeakVelocity   :: Int             -- peak velocity hold for VU meter
+    , tuiRunning       :: Bool
+    , tuiStatusMessage :: String
+    , tuiTuningMode    :: Bool
+    , tuiTuningNote    :: Maybe Int
+    , tuiTuningCents   :: Double            -- -50.0 – 50.0
+    , tuiTuningInTune  :: Bool
+    , tuiJackStatus    :: JackStatus
     }
 
--- NOTE: All scales are currently rooted in C.  When root-key selection is added,
--- these should be generated dynamically (e.g. map (++ " " ++ rootName) modeNames).
 availableScales :: [String]
 availableScales =
     [ "C Major", "C Minor", "C Dorian", "C Phrygian", "C Lydian"
@@ -388,19 +336,16 @@ initialTUIState cfg tip = TUIState
     , tuiNoteHistory   = []
     , tuiConfidence    = 0.0
     , tuiLatency       = 0.0
-    , tuiWaveform      = replicate waveformSamples 0.0
+    , tuiWaveform      = replicate 64 0.0
     , tuiScaleIndex    = 0
     , tuiArpeggioIndex = 0
     , tuiRunning       = True
     , tuiStatusMessage = "READY  ─  PRESS ENTER TO START"
-    , tuiStatusExpiry  = Nothing
     , tuiTuningMode    = False
     , tuiTuningNote    = Nothing
     , tuiTuningCents   = 0.0
     , tuiTuningInTune  = False
-    , tuiJackStatus    = JackDisconnected
-    , tuiNoteFlash     = 0
-    , tuiPeakVelocity  = 0
+    , tuiJackStatus    = JackConnected  -- Assume connected, backend handles JACK
     }
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -419,34 +364,22 @@ midiNotePart n = safeIndex noteNames (n `mod` 12) "C"
 midiOctavePart :: Int -> String
 midiOctavePart n = show ((n `div` 12) - 1)
 
--- VU-meter with peak-hold marker │
-vuBarWithPeak :: Int -> Int -> Int -> String
-vuBarWithPeak w v peak =
-    let toPos x = clamp 0 (w - 1)
-            (round (fromIntegral x / 127.0 * fromIntegral (w - 1) :: Double) :: Int)
-        vPos    = toPos v
-        pPos    = toPos peak
-        cell i
-            | i <= vPos = '█'
-            | i == pPos = '│'
-            | otherwise = '░'
-    in  "▐" ++ map cell [0 .. w - 1] ++ "▌"
+-- VU-meter bar: ▐████████░░░░▌
+vuBar :: Int -> Int -> String
+vuBar w v =
+    let filled = clamp 0 w
+            (round (fromIntegral v / 127.0 * fromIntegral w :: Double) :: Int)
+    in  "▐" ++ replicate filled '█' ++ replicate (w - filled) '░' ++ "▌"
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Waveform renderers
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- Amplitude envelope spark-line: uses |x| so positive and negative excursions
--- both read as signal energy.  Sign is shown in the dot-plot below.
 sparkLine :: [Double] -> String
 sparkLine samples =
     let chars  = " ▁▂▃▄▅▆▇█"
         toIdx x = clamp 0 8 (round (abs x * 8.0) :: Int)
     in  map (\x -> safeIndex chars (toIdx x) ' ') samples
-
--- True when any sample touches the rail — signals overload to the user.
-waveformIsClipping :: [Double] -> Bool
-waveformIsClipping = any (\x -> abs x >= 0.95)
 
 -- Multi-row dot-plot oscilloscope — CRT phosphor aesthetic.
 waveformRows :: [Double] -> Int -> [String]
@@ -456,7 +389,7 @@ waveformRows samples height =
         toRow x = clamp 0 (height - 1)
                      (round ((x + 1.0) / 2.0 * fromIntegral (height - 1)) :: Int)
         rowOf  = map toRow samps
-        mkLine r = map (\rv -> if rv == r then '●' else '·') rowOf
+        mkLine r = [ if rv == r then '●' else '·' | (_, rv) <- zip [0 :: Int ..] rowOf ]
     in  [ mkLine r | r <- [height - 1, height - 2 .. 0] ]
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -501,6 +434,15 @@ centsBar cents =
         lChar  = if offset < 0 then '◀' else '░'
         rChar  = if offset > 0 then '▶' else '░'
     in  replicate pos lChar ++ "┃" ++ replicate (total - 1 - pos) rChar
+
+-- Cents deviation from equal temperament.
+-- NOTE: requires deFrequency :: Double (Hz) on DetectionEvent.
+centsFromFreq :: Int -> Double -> Double
+centsFromFreq midiNote freqHz
+    | freqHz <= 0.0 = 0.0
+    | otherwise     =
+        let fRef = 440.0 * (2.0 ** (fromIntegral (midiNote - 69) / 12.0))
+        in  1200.0 * logBase 2 (freqHz / fRef)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Border styles
@@ -586,17 +528,15 @@ drawStartMenu state =
     vBox
         [ logoBlock state
         , str " "
-        , sectionHeader "T I P"
+        , sectionHeader state "T I P"
         , padLeft (Pad 2) $ withAttr splashBodyAttr (str (tuiTip state))
         , str " "
-        , sectionHeader "J A C K  S E T U P"
+        , sectionHeader state "J A C K  S E T U P"
         , vBox [ padLeft (Pad 2) $ withAttr splashBodyAttr (str l) | l <- jackGuide ]
         , str " "
-        , sectionHeader "C O L O R  T H E M E"
+        , sectionHeader state "C O L O R  T H E M E"
         , str " "
         , paletteSelector state
-        , str " "
-        , hCenter (jackStatusWidget state)
         , str " "
         , hCenter (pressEnterWidget state)
         , str " "
@@ -626,14 +566,11 @@ logoBlock state =
 
 -- ── Section divider header ────────────────────────────────────────────────────
 
-sectionHeader :: String -> Widget ()
-sectionHeader label =
+sectionHeader :: TUIState -> String -> Widget ()
+sectionHeader state label =
     padBottom (Pad 1) $
     withAttr splashDivAttr $
-    hBox
-        [ str ("  ─── " ++ label ++ " ")
-        , fill '─'
-        ]
+    str ("  ─── " ++ label ++ " " ++ replicate (max 0 (44 - length label)) '─')
 
 -- ── Palette selector ──────────────────────────────────────────────────────────
 
@@ -658,30 +595,27 @@ paletteOption state p =
 
 jackStatusWidget :: TUIState -> Widget ()
 jackStatusWidget state =
-    let (statusText, jackAtr) = case tuiJackStatus state of
+    let (statusText, statusAttr) = case tuiJackStatus state of
             JackConnected    -> ("● JACK CONNECTED  ─  PRESS ENTER", jackGoodAttr)
             JackDisconnected -> ("○ WAITING FOR JACK...", jackBadAttr)
             JackReconnecting -> ("◐ RECONNECTING...", jackWarnAttr)
             JackError msg    -> ("○ JACK ERROR: " ++ take 20 msg, jackBadAttr)
         blinkOn = tuiTick state `mod` 2 == 0
-        atr     = if tuiJackStatus state == JackConnected
-                  then if blinkOn then accentAttr else jackAtr
-                  else jackAtr
+        atr     = if tuiJackStatus state == JackConnected 
+                  then if blinkOn then accentAttr else statusAttr
+                  else statusAttr
     in  withAttr atr $ str statusText
 
 pressEnterWidget :: TUIState -> Widget ()
 pressEnterWidget state =
-    let blinkOn = tuiTick state `mod` 2 == 0
-        (atr, msg) = case tuiJackStatus state of
-            JackConnected    ->
-                ( if blinkOn then accentAttr else jackGoodAttr
-                , "▶   P R E S S   E N T E R   ◀" )
-            JackReconnecting ->
-                ( if blinkOn then jackWarnAttr else dimAttr
-                , "◐   R E C O N N E C T I N G …" )
-            _                ->
-                ( dimAttr
-                , "      W A I T I N G   F O R   J A C K      " )
+    let jackReady = tuiJackStatus state == JackConnected
+        blinkOn   = tuiTick state `mod` 2 == 0
+        atr       = if jackReady 
+                    then if blinkOn then accentAttr else jackGoodAttr
+                    else dimAttr
+        msg       = if jackReady 
+                    then "▶   P R E S S   E N T E R   ◀"
+                    else "      W A I T I N G   F O R   J A C K      "
     in  withAttr atr $ str msg
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -713,7 +647,7 @@ drawMainUI :: TUIState -> Widget ()
 drawMainUI state =
     withBorderStyle retroBorder $
     borderWithLabel (withAttr titleAttr $ str mainTitle) $
-    vBox $
+    vBox
         [ topRow     state
         , hBorder
         , heroPanel  state
@@ -729,30 +663,8 @@ drawMainUI state =
         , statusRow  state
         , mainHelpBar
         ]
-        -- Append a JACK warning banner below the help bar when not connected.
-        ++ jackWarningBanner state
   where
-    badge
-        | tuiTuningMode state = " [TUNER]"
-        | not (tuiRunning state) = " [PAUSED]"
-        | otherwise = ""
-    mainTitle = " ◈  " ++ intersperse '·' "DeMoD-NOTE" ++ badge ++ "  ◈ "
-
--- Full-width warning banner rendered only when JACK is unhealthy.
-jackWarningBanner :: TUIState -> [Widget ()]
-jackWarningBanner state = case tuiJackStatus state of
-    JackConnected -> []
-    JackReconnecting ->
-        let blinkOn = tuiTick state `mod` 2 == 0
-            atr     = if blinkOn then jackWarnAttr else dimAttr
-        in  [ withAttr atr $ hCenter $ str "◐  JACK RECONNECTING — AUDIO PAUSED  ◐" ]
-    JackDisconnected ->
-        let blinkOn = tuiTick state `mod` 2 == 0
-            atr     = if blinkOn then jackBadAttr else dimAttr
-        in  [ withAttr atr $ hCenter $ str "○  JACK DISCONNECTED — CHECK ROUTING  ○" ]
-    JackError msg ->
-        [ withAttr jackBadAttr $ hCenter $
-            str ("○  JACK ERROR: " ++ take 40 msg ++ "  ○") ]
+    mainTitle = " ◈  " ++ intersperse '·' "DeMoD-NOTE" ++ "  ◈ "
 
 -- ── Top row: J A C K  │  T A P  B P M  │  S I G N A L ───────────────────────
 
@@ -769,17 +681,11 @@ jackPanel :: TUIState -> Widget ()
 jackPanel state = padAll 1 $ hLimit 22 $
     vBox
         [ withAttr dimAttr (str (spaced "JACK"))
-        , hBox [ withAttr dotAtr (str dot), str " ", withAttr ja (str lbl) ]
+        , hBox [ withAttr ja (str dot), str " ", withAttr ja (str lbl) ]
         ]
   where
-    status  = tuiJackStatus state
-    blinkOn = tuiTick state `mod` 2 == 0
-    ja      = jackAttr status
-    -- Blink the dot to draw attention when JACK is unhealthy
-    dotAtr  = case status of
-        JackConnected -> jackGoodAttr
-        _             -> if blinkOn then ja else dimAttr
-    (dot, lbl) = jackDisplay status
+    ja         = jackAttr (tuiJackStatus state)
+    (dot, lbl) = jackDisplay (tuiJackStatus state)
 
 jackDisplay :: JackStatus -> (String, String)
 jackDisplay JackConnected    = ("●", "CONNECTED")
@@ -801,17 +707,14 @@ bpmPanel state = padAll 1 $ hLimit 24 $
         , hBox
             [ withAttr highConfAttr (str tapsOn)
             , withAttr dimAttr      (str tapsOff)
-            , withAttr dimAttr      (str "  ")
-            , withAttr highConfAttr (str qualityRing)
             , withAttr dimAttr      (str "  [SPC]")
             ]
         ]
   where
-    bpmStr      = show (round (tuiBPM state) :: Int)
-    tapCount    = length (tuiTapTimes state)
-    tapsOn      = replicate tapCount '●'
-    tapsOff     = replicate (max 0 (maxTapSamples - tapCount)) '○'
-    qualityRing = tapQualityRing (tuiTapTimes state)
+    bpmStr   = show (round (tuiBPM state) :: Int)
+    tapCount = length (tuiTapTimes state)
+    tapsOn   = replicate tapCount '●'
+    tapsOff  = replicate (max 0 (8 - tapCount)) '○'
 
 signalPanel :: TUIState -> Widget ()
 signalPanel state = padAll 1 $
@@ -845,10 +748,11 @@ signalPanel state = padAll 1 $
 heroPanel :: TUIState -> Widget ()
 heroPanel state =
     withBorderStyle innerBorder $
-    borderWithLabel heroLabel $
+    borderWithLabel (withAttr dimAttr $ str " L A S T  N O T E ") $
     padAll 1 $ padLeftRight 2 $
     case tuiLastNote state of
         Nothing ->
+            -- Animate the waiting glyph using tick.
             let waitGlyphs = ["○", "◌", "○", "◎"] :: [String]
                 glyph      = safeIndex waitGlyphs (tuiTick state `mod` 4) "○"
             in  hBox [ withAttr dimAttr (str (glyph ++ "  ─  awaiting input")) ]
@@ -859,13 +763,9 @@ heroPanel state =
                 , withAttr dimAttr      (str "   ·   midi ")
                 , withAttr valueAttr    (str (show n))
                 , withAttr dimAttr      (str "   ·   vel ")
-                , withAttr velAttr      (str (vuBarWithPeak 12 v (tuiPeakVelocity state)))
+                , withAttr velAttr      (str (vuBar 12 v))
                 , withAttr dimAttr      (str ("  " ++ show v))
                 ]
-  where
-    -- Border label flashes accent on note arrival, dims after 3 ticks.
-    labelAtr = if tuiNoteFlash state > 0 then accentAttr else dimAttr
-    heroLabel = withAttr labelAtr $ str " L A S T  N O T E "
 
 -- ── Waveform panel ───────────────────────────────────────────────────────────
 
@@ -883,13 +783,9 @@ waveformPanel state =
     wave    = tuiWaveform state
     runAttr = if tuiRunning state then highConfAttr else midConfAttr
     runStr  = if tuiRunning state then "▶ RUNNING" else "⏸ PAUSED  [p] resume"
-    clipW   = if waveformIsClipping wave
-                then hBox [ withAttr dimAttr (str "  "), withAttr lowConfAttr (str "⚡ CLIP") ]
-                else emptyWidget
     waveLabel = hBox
         [ withAttr dimAttr (str " W A V E F O R M  ")
         , withAttr runAttr (str runStr)
-        , clipW
         , withAttr dimAttr (str " ")
         ]
 
@@ -964,21 +860,14 @@ historyRow :: TUIState -> Widget ()
 historyRow state = padAll 1 $
     hBox
         [ withAttr dimAttr (str (spaced "HIST" ++ "  "))
-        , histContent
+        , withAttr dimAttr (str histStr)
         ]
   where
-    hist = tuiNoteHistory state
-    histContent
-        | null hist = withAttr dimAttr (str "─  no notes yet  ─")
-        | otherwise = hBox $ intersperse sep $ map noteChip (take maxNoteHistory hist)
-    sep = withAttr dimAttr (str "  ╌  ")
-    -- Sharp notes (containing '#') rendered in accent; naturals in value.
-    noteChip (n, v) =
-        let name = midiToName n
-            atr  = if '#' `elem` name then heroNoteAttr else valueAttr
-        in  hBox [ withAttr atr (str name)
-                 , withAttr dimAttr (str ("·" ++ show v))
-                 ]
+    hist    = tuiNoteHistory state
+    histStr
+        | null hist = "─  no notes yet  ─"
+        | otherwise = intercalate "  ╌  "
+            [ midiToName n ++ "·" ++ show v | (n, v) <- take 10 hist ]
 
 -- ── Status + help bars ───────────────────────────────────────────────────────
 
@@ -1003,26 +892,10 @@ mainHelpBar = withAttr helpAttr $ padLeftRight 1 $
 handleEvent :: BrickEvent () TUIEvent -> EventM () TUIState ()
 
 -- ── Animation tick (both modes) ───────────────────────────────────────────────
-handleEvent (AppEvent TUITick) = modify' $ \s ->
-    let tick'   = tuiTick s + 1
-        flash'  = max 0 (tuiNoteFlash s - 1)
-        -- Peak velocity decays by 1 every 6 ticks (~1.7 sec full decay).
-        peak'   = if tick' `mod` 6 == 0
-                    then max 0 (tuiPeakVelocity s - 1)
-                    else tuiPeakVelocity s
-        -- Status reverts to a context-appropriate idle message when expired.
-        (msg', expiry') = case tuiStatusExpiry s of
-            Just e | tick' >= e ->
-                let idle = idleStatus s
-                in  (idle, Nothing)
-            other -> (tuiStatusMessage s, other)
-    in  s { tuiTick          = tick'
-          , tuiNoteFlash     = flash'
-          , tuiPeakVelocity  = peak'
-          , tuiStatusMessage = msg'
-          , tuiStatusExpiry  = expiry'
-          }
+handleEvent (AppEvent TUITick) =
+    modify' $ \s -> s { tuiTick = tuiTick s + 1 }
 
+-- ── Start menu ───────────────────────────────────────────────────────────────
 handleEvent ev = do
     mode <- gets tuiMode
     case mode of
@@ -1030,37 +903,18 @@ handleEvent ev = do
         MainMode      -> handleMainEvent  ev
         SoundFontMode -> handleSoundFontEvent ev
 
--- Idle status message reflects current session context.
-idleStatus :: TUIState -> String
-idleStatus s = case tuiJackStatus s of
-    JackDisconnected -> "WAITING FOR JACK  ─  CHECK ROUTING"
-    JackReconnecting -> "RECONNECTING TO JACK…"
-    JackError msg    -> "JACK ERROR  ─  " ++ take 40 msg
-    JackConnected
-        | tuiTuningMode s -> "TUNER ACTIVE  ─  [t] to exit"
-        | not (tuiRunning s) -> "PAUSED  ─  [p] to resume"
-        | otherwise ->
-            let sc = safeIndex availableScales (tuiScaleIndex s) "?"
-            in  "LISTENING  ─  " ++ sc
-
 handleStartEvent :: BrickEvent () TUIEvent -> EventM () TUIState ()
 handleStartEvent (VtyEvent e) = case e of
     EvKey (KChar 'q') [] -> halt
     EvKey KEsc         [] -> halt
 
-    -- ENTER: transition to main UI only when JACK is fully connected.
-    -- JackReconnecting is not sufficient — audio routing must be confirmed.
+    -- ENTER: transition to main UI (only when JACK is connected)
     EvKey KEnter [] -> do
-        jack <- gets tuiJackStatus
-        case jack of
-            JackConnected    -> modify' $ \s ->
-                s { tuiMode = MainMode
-                  , tuiStatusMessage = "JACK CONNECTED  ─  AWAITING INPUT"
-                  , tuiStatusExpiry  = Nothing   -- persistent until next action
-                  }
-            JackReconnecting -> modify' $ setStatus "RECONNECTING  ─  WAIT FOR JACK…"
-            JackDisconnected -> modify' $ setStatus "JACK NOT CONNECTED  ─  CHECK ROUTING"
-            JackError msg    -> modify' $ setStatus ("JACK ERROR  ─  " ++ take 40 msg)
+        jackReady <- gets (tuiJackStatus)
+        when (jackReady == JackConnected) $ modify' $ \s ->
+            s { tuiMode          = MainMode
+              , tuiStatusMessage = "JACK CONNECTED  ─  AWAITING INPUT"
+              }
 
     -- 1–5: select palette (live preview — attr map is dynamic)
     EvKey (KChar c) [] | Just p <- paletteFromChar c ->
@@ -1085,11 +939,13 @@ handleMainEvent (VtyEvent e) = case e of
     EvKey (KChar ' ') [] -> do
         now <- liftIO getCurrentTime
         modify' $ \s ->
-            let taps   = take maxTapSamples (now : tuiTapTimes s)
+            let taps   = take 8 (now : tuiTapTimes s)
                 newBPM = computeBPM taps
-            in  setStatus ("TAP " ++ show (length taps)
-                                  ++ " / 8  ─  " ++ show (round newBPM :: Int) ++ " BPM")
-                    (s { tuiTapTimes = taps, tuiBPM = newBPM })
+            in  s { tuiTapTimes      = taps
+                  , tuiBPM           = newBPM
+                  , tuiStatusMessage = "TAP " ++ show (length taps)
+                                    ++ " / 8  ─  " ++ show (round newBPM :: Int) ++ " BPM"
+                  }
 
     EvKey (KChar 's') [] -> cycleScale    1
     EvKey (KChar 'S') [] -> cycleScale  (-1)
@@ -1101,79 +957,58 @@ handleMainEvent (VtyEvent e) = case e of
         let palettes = allPalettes
             idx      = length (takeWhile (/= tuiPalette s) palettes)
             next     = safeIndex palettes ((idx + 1) `mod` length palettes) Synthwave
-        in  setStatus ("THEME: " ++ paletteName next) (s { tuiPalette = next })
+        in  s { tuiPalette     = next
+              , tuiStatusMessage = "THEME: " ++ paletteName next
+              }
 
     -- Or pick palette directly by number
     EvKey (KChar c) [] | Just p <- paletteFromChar c ->
-        modify' $ \s -> setStatus ("THEME: " ++ paletteName p) (s { tuiPalette = p })
+        modify' $ \s ->
+            s { tuiPalette     = p
+              , tuiStatusMessage = "THEME: " ++ paletteName p
+              }
 
     EvKey (KChar 'p') [] -> modify' $ \s ->
         let r = not (tuiRunning s)
-        in  setStatus (if r then "RUNNING" else "PAUSED") (s { tuiRunning = r })
+        in  s { tuiRunning = r, tuiStatusMessage = if r then "RUNNING" else "PAUSED" }
 
     EvKey (KChar 'r') [] -> modify' $ \s ->
-        setStatus "TAP TEMPO RESET  ─  120 BPM"
-            (s { tuiTapTimes = [], tuiBPM = 120.0, tuiPeakVelocity = 0 })
+        s { tuiTapTimes = [], tuiBPM = 120.0
+          , tuiStatusMessage = "TAP TEMPO RESET  ─  120 BPM"
+          }
 
     EvKey (KChar 't') [] -> modify' $ \s ->
         let m = not (tuiTuningMode s)
-        in  setStatus (if m then "TUNER ON  ─  PLAY A NOTE" else "TUNER OFF")
-                (s { tuiTuningMode = m })
+        in  s { tuiTuningMode    = m
+              , tuiStatusMessage = if m then "TUNER ON  ─  PLAY A NOTE" else "TUNER OFF"
+              }
 
     -- Open SoundFont browser
-    EvKey (KChar 'f') [] -> modify' $ \s -> s { tuiMode = SoundFontMode }
+    EvKey (KChar 'f') [] -> modify' $ \s ->
+        s { tuiMode = SoundFontMode }
 
     _ -> return ()
 
 handleMainEvent (AppEvent (TUIStatusMsg msg)) =
-    modify' $ setStatus msg
+    modify' $ \s -> s { tuiStatusMessage = msg }
 
--- Detection event: update all signal metrics; also handle JACK status
--- transitions so the UI reacts visually to drops and reconnections.
+-- Detection event: always update signal metrics; tuning only on note-on.
 handleMainEvent (AppEvent (TUIDetection det)) = modify' $ \s ->
-    let newJack   = deJackStatus det
-        prevJack  = tuiJackStatus s
-        jackChanged = newJack /= prevJack
-        audioLive = newJack == JackConnected
-
-        mNote = if audioLive then deNote det else Nothing
+    let mNote = deNote det
         hist' = case mNote of
-            Nothing     -> if audioLive then tuiNoteHistory s else []
-            Just (n, v) -> take maxNoteHistory ((n, v) : tuiNoteHistory s)
-        wave' = if audioLive
-                    then take waveformSamples (deWaveform det ++ repeat 0.0)
-                    else replicate waveformSamples 0.0
-
-        -- Flash hero border for 3 ticks on any new note-on.
-        flash' = case (tuiLastNote s, mNote) of
-            (_, Just _) | mNote /= tuiLastNote s -> 3
-            _                                     -> tuiNoteFlash s
-
-        -- Peak velocity: update on new note-on, otherwise hold.
-        peak' = case mNote of
-            Just (_, v) -> max v (tuiPeakVelocity s)
-            Nothing     -> tuiPeakVelocity s
-
-        -- Status: only override on JACK transitions so tap/scale msgs survive.
-        s1 = s { tuiLastNote      = mNote
-               , tuiNoteHistory   = hist'
-               , tuiConfidence    = if audioLive then deConfidence det else 0.0
-               , tuiLatency       = if audioLive then deLatency    det else 0.0
-               , tuiWaveform      = wave'
-               , tuiTuningNote    = if audioLive then deTuningNote    det else Nothing
-               , tuiTuningCents   = if audioLive then deTuningCents   det else 0.0
-               , tuiTuningInTune  = if audioLive then deTuningInTune  det else False
-               , tuiJackStatus    = newJack
-               , tuiNoteFlash     = flash'
-               , tuiPeakVelocity  = peak'
-               }
-    in  if not jackChanged
-            then s1
-            else case (prevJack, newJack) of
-                (_, JackConnected)    -> setStatus "JACK RECONNECTED  ─  AWAITING INPUT" s1
-                (_, JackDisconnected) -> setStatus "JACK DISCONNECTED  ─  CHECK ROUTING" s1
-                (_, JackReconnecting) -> setStatus "JACK RECONNECTING  ─  PLEASE WAIT"   s1
-                (_, JackError msg)    -> setStatus ("JACK ERROR  ─  " ++ take 30 msg)    s1
+            Nothing     -> tuiNoteHistory s
+            Just (n, v) -> take 10 ((n, v) : tuiNoteHistory s)
+        wave' = take 64 (deWaveform det ++ repeat 0.0)
+    in  s { tuiLastNote      = mNote
+          , tuiNoteHistory   = hist'
+          , tuiConfidence    = deConfidence det
+          , tuiLatency       = deLatency    det
+          , tuiWaveform      = wave'
+          , tuiTuningNote    = deTuningNote det
+          , tuiTuningCents   = deTuningCents det
+          , tuiTuningInTune  = deTuningInTune det
+          , tuiJackStatus    = deJackStatus det
+          }
 
 handleMainEvent _ = return ()
 
@@ -1184,16 +1019,13 @@ handleSoundFontEvent (VtyEvent e) = case e of
     EvKey KEsc         [] -> modify' $ \s -> s { tuiMode = MainMode }
     EvKey (KChar 'q')  [] -> modify' $ \s -> s { tuiMode = MainMode }
     EvKey KEnter       [] -> do
-        -- Open browser: try xdg-open (Linux), then open (macOS).
-        -- Using spawnCommand with a hardcoded URL; if this ever becomes
-        -- user-configurable, switch to System.Process.rawSystem to avoid
-        -- shell injection.
-        _ <- liftIO $ spawnCommand
-            "xdg-open https://musical-artifacts.com 2>/dev/null || open https://musical-artifacts.com 2>/dev/null"
-        modify' $ \s ->
-            s { tuiMode = MainMode
-              , tuiStatusMessage = "SOUNDFONT: Visit musical-artifacts.com to download!"
-              }
+        -- Open browser to musical-artifacts.com for donation
+        _ <- liftIO $ System.Process.spawnCommand 
+            "xdg-open https://musical-artifacts.com 2>/dev/null || open https://musical-artifacts.com 2>/dev/null || echo 'Please visit https://musical-artifacts.com'"
+        modify' $ \s -> s 
+            { tuiMode = MainMode
+            , tuiStatusMessage = "SOUNDFONT: Visit musical-artifacts.com to download!"
+            }
     _ -> return ()
 handleSoundFontEvent _ = return ()
 
@@ -1247,14 +1079,16 @@ pressEscapeWidget state =
 cycleScale :: Int -> EventM () TUIState ()
 cycleScale dir = modify' $ \s ->
     let n = (tuiScaleIndex s + dir) `mod` length availableScales
-    in  setStatus ("SCALE  ─  " ++ safeIndex availableScales n "?")
-            (s { tuiScaleIndex = n })
+    in  s { tuiScaleIndex    = n
+          , tuiStatusMessage = "SCALE  ─  " ++ safeIndex availableScales n "?"
+          }
 
 cycleArpeggio :: Int -> EventM () TUIState ()
 cycleArpeggio dir = modify' $ \s ->
     let n = (tuiArpeggioIndex s + dir) `mod` length availableArpeggios
-    in  setStatus ("ARPEGGIO  ─  " ++ safeIndex availableArpeggios n "?")
-            (s { tuiArpeggioIndex = n })
+    in  s { tuiArpeggioIndex = n
+          , tuiStatusMessage = "ARPEGGIO  ─  " ++ safeIndex availableArpeggios n "?"
+          }
 
 computeBPM :: [UTCTime] -> Double
 computeBPM []  = 120.0
@@ -1264,28 +1098,6 @@ computeBPM ts  =
         intervals = map (\(a, b) -> realToFrac (diffUTCTime a b) :: Double) pairs
         avg       = sum intervals / fromIntegral (length intervals)
     in  clamp 20.0 300.0 (60.0 / avg)
-
--- Tap quality: standard deviation of inter-tap intervals, normalised.
--- Returns a 0–4 ring string ("○○○○" → "●●●●") reflecting timing tightness.
-tapQualityRing :: [UTCTime] -> String
-tapQualityRing ts
-    | length ts < 4 = replicate 4 '○'   -- need 4 taps for meaningful variance
-    | otherwise =
-        let pairs     = zip ts (safeTail ts)
-            ivs       = map (\(a,b) -> abs (realToFrac (diffUTCTime a b) :: Double)) pairs
-            mean      = sum ivs / fromIntegral (length ivs)
-            variance  = sum (map (\x -> (x - mean)^(2::Int)) ivs) / fromIntegral (length ivs)
-            stddev    = sqrt variance
-            -- stddev < 10ms → 4 solid; < 30ms → 3; < 60ms → 2; else 1
-            filled    = clamp 1 4 $ if stddev < 0.010 then 4
-                                    else if stddev < 0.030 then 3
-                                    else if stddev < 0.060 then 2
-                                    else 1
-        in  replicate filled '●' ++ replicate (4 - filled) '○'
-
--- Set a status message that auto-reverts to idle after ~3 seconds (12 ticks @ 280 ms).
-setStatus :: String -> TUIState -> TUIState
-setStatus msg s = s { tuiStatusMessage = msg, tuiStatusExpiry = Just (tuiTick s + statusExpiryTicks) }
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Attribute names
@@ -1339,76 +1151,77 @@ progressIncompleteAttr = attrName "progressIncomplete"
 -- Entry points
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- | Fork a thread that restarts itself on exception after a 1-second back-off.
---   Prevents silent thread death from killing animations or the backend bridge.
-supervisedForkIO :: IO () -> IO ()
-supervisedForkIO action = void $ forkIO $ forever $
-    action `catch` \(_ :: SomeException) -> threadDelay 1_000_000
+runTUI :: Config -> IO ()
+runTUI cfg = runTUIWithChannel cfg Nothing
 
--- | Shared setup: choose a tip, create the BChan, and spawn the animation
---   tick thread.  Both runners call this then add their own bridge thread.
-initTUICommon :: Config -> IO (TUIState, BChan TUIEvent)
-initTUICommon cfg = do
+-- | Run TUI with shared backend state for detection updates
+runTUIWithState :: Config -> TVar ReactorState -> IO ()
+runTUIWithState cfg stateVar = do
+    -- Pick a pseudo-random tip based on seconds since epoch.
     posix <- getPOSIXTime
     let tipIdx = (floor posix :: Int) `mod` length tips
         tip    = safeIndex tips tipIdx "Enjoy the music."
         initSt = initialTUIState cfg tip
-    bc <- newBChan bChanCapacity
-    -- Animation tick: drives logo shimmer and waiting-glyph pulse.
-    supervisedForkIO $ do
-        threadDelay tickIntervalUs
+
+    bc <- newBChan 100
+
+    -- Animation tick: fires every 280 ms
+    void $ forkIO $ forever $ do
+        threadDelay 280000
         writeBChan bc TUITick
-    return (initSt, bc)
 
-runTUI :: Config -> IO ()
-runTUI cfg = runTUIWithChannel cfg Nothing
-
--- | Run TUI driven by a shared TVar from the backend.
---   Polls at 100 Hz but only writes to BChan when relevant state changes,
---   preventing channel saturation and tick-thread starvation.
-runTUIWithState :: Config -> TVar ReactorState -> IO ()
-runTUIWithState cfg stateVar = do
-    (initSt, bc) <- initTUICommon cfg
-    prevRef <- newIORef Nothing
-    -- Change-gated poll.  Key covers every field the TUI renders so that
-    -- a JACK drop, waveform burst, or tuning change all reach the UI.
-    supervisedForkIO $ do
-        threadDelay 10_000  -- 100 Hz
+    -- Poll backend state and send detection events to TUI
+    void $ forkIO $ forever $ do
+        threadDelay 10000  -- 10ms poll rate
         rs <- atomically $ readTVar stateVar
-        prev <- readIORef prevRef
-        let mNote = case currentNotes rs of { [] -> Nothing; (n:_) -> Just n }
-            key   = ( mNote
-                    , noteStateMach rs
-                    , jackStatus    rs   -- JACK drop without note change now propagates
-                    )
-        when (prev /= Just key) $ do
-            writeIORef prevRef (Just key)
-            let det = DetectionEvent
-                    { deNote         = mNote
-                    , deConfidence   = detectionConfidence rs
-                    , deLatency      = detectionLatency    rs
-                    , deWaveform     = latestWaveform      rs
-                    , deState        = noteStateMach       rs
-                    , deTuningNote   = detectedTuningNote   rs
-                    , deTuningCents  = detectedTuningCents  rs
-                    , deTuningInTune = detectedTuningInTune rs
-                    , deJackStatus   = jackStatus          rs
-                    }
-            writeBChan bc (TUIDetection det)
+        let det = DetectionEvent
+                { deNote = case currentNotes rs of
+                    []    -> Nothing
+                    (n:_) -> Just n
+                , deConfidence = 0.8  -- Default confidence
+                , deLatency = 2.66
+                , deWaveform = []
+                , deState = noteStateMach rs
+                , deTuningNote = Nothing
+                , deTuningCents = 0.0
+                , deTuningInTune = True
+                , deJackStatus = JackConnected
+                }
+        writeBChan bc (TUIDetection det)
+
     let buildVty = mkVty defaultConfig
     initVty <- buildVty
     void $ customMain initVty buildVty (Just bc) tuiApp initSt
 
--- | Launch the TUI with an optional legacy Chan bridge.
---   Always uses customMain so the animation tick thread drives start-menu effects.
+-- | Launch the TUI.  Always uses customMain (even with no backend channel)
+--   so the animation tick thread can drive start-menu effects.
+--
+--   Bug fixed: previously defaultMain was always used, silently dropping
+--   backend detection events when a BChan was constructed.
 runTUIWithChannel :: Config -> Maybe (Chan DetectionEvent) -> IO ()
 runTUIWithChannel cfg mChan = do
-    (initSt, bc) <- initTUICommon cfg
+    -- Pick a pseudo-random tip based on seconds since epoch.
+    posix <- getPOSIXTime
+    let tipIdx = (floor posix :: Int) `mod` length tips
+        tip    = safeIndex tips tipIdx "Enjoy the music."
+        initSt = initialTUIState cfg tip
+
+    bc <- newBChan 100
+
+    -- Animation tick: fires every 280 ms → ~3.6 ticks/sec.
+    -- Drives logo shimmer and "press enter" pulse on start screen,
+    -- and the hero panel waiting glyph on the main screen.
+    void $ forkIO $ forever $ do
+        threadDelay 280000
+        writeBChan bc TUITick
+
+    -- Optional: backend detection event bridge.
     case mChan of
         Nothing   -> return ()
-        Just chan -> supervisedForkIO $ do
+        Just chan  -> void $ forkIO $ forever $ do
             ev <- readChan chan
             writeBChan bc (TUIDetection ev)
+
     let buildVty = mkVty defaultConfig
     initVty <- buildVty
     void $ customMain initVty buildVty (Just bc) tuiApp initSt

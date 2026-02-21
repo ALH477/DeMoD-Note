@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP #-}
 
 module Main where
 
@@ -9,15 +10,18 @@ import DeMoDNote.Backend
 import DeMoDNote.OSC
 import DeMoDNote.Monitor
 import DeMoDNote.Types
-import DeMoDNote.TUI (runTUI)
+import DeMoDNote.TUI (runTUI, runTUIWithChannel, runTUIWithState)
 import DeMoDNote.Preset (getPresetByName, listPresets)
 import DeMoDNote.Scale (getScaleByName, allScaleNames)
 import DeMoDNote.Arpeggio (createArpeggio, majorChord, upPattern)
 import qualified DeMoDNote.BPM as BPM
+#ifdef FlagOpenGL
+import DeMoDNote.Opengl (runOpenGLVisualizer, runOpenGLStandalone, OpenGLConfig(..), defaultOpenGLConfig)
+#endif
 import Katip
 import Control.Concurrent.Async
 import Control.Concurrent.STM
-import Control.Concurrent (forkIO, threadDelay, readChan)
+import Control.Concurrent (forkIO, forkOS, threadDelay, readChan, newChan, writeChan, Chan)
 import System.Exit
 import System.IO (stdout)
 import qualified Data.Text as T
@@ -31,6 +35,8 @@ data Command
   | ListScales
   | ShowPreset { cmdPresetName :: String }
   | TUI
+  | OpenGL { cmdMidiFile :: Maybe FilePath, cmdObjFile :: Maybe FilePath, cmdSvgFile :: Maybe FilePath }
+  | OpenGLWithBackend { cmdConfig :: Maybe FilePath }
   deriving (Show)
 
 optsParser :: Parser Command
@@ -42,7 +48,19 @@ optsParser = subparser
     <> command "list-scales" (info listScalesCmd (progDesc "List available scales"))
     <> command "show-preset" (info showPresetCmd (progDesc "Show preset details"))
     <> command "tui" (info tuiCmd (progDesc "Launch interactive TUI"))
+    <> command "opengl" (info openglCmd (progDesc "Launch OpenGL visualizer (standalone)"))
+    <> command "opengl-backend" (info openglBackendCmd (progDesc "Launch OpenGL visualizer with JACK backend"))
   )
+
+openglCmd :: Parser Command
+openglCmd = OpenGL
+  <$> optional (strOption (long "midi" <> short 'm' <> metavar "FILE" <> help "MIDI file for falling notes"))
+  <*> optional (strOption (long "obj" <> short 'o' <> metavar "FILE" <> help "OBJ 3D model file"))
+  <*> optional (strOption (long "svg" <> short 's' <> metavar "FILE" <> help "SVG file for rendering"))
+
+openglBackendCmd :: Parser Command
+openglBackendCmd = OpenGLWithBackend
+  <$> optional (strOption (long "config" <> short 'c' <> metavar "FILE" <> help "Config file"))
 
 runCmd :: Parser Command
 runCmd = Run
@@ -120,8 +138,45 @@ main = do
       state <- newTVarIO (emptyReactorState cfg)
       putStrLn "Starting DeMoD-Note TUI with JACK backend..."
       backendAsync <- async $ runBackend cfg state
-      runTUI cfg
+      runTUIWithState cfg state
       cancel backendAsync
+    
+#ifdef FlagOpenGL
+    OpenGL mMidi mObj mSvg -> do
+      putStrLn "Starting OpenGL visualizer (standalone mode)..."
+      let oglCfg = defaultOpenGLConfig
+            { oglMidiFile = mMidi
+            , oglObjFile = mObj
+            , oglSvgFile = mSvg
+            }
+      runOpenGLStandalone oglCfg
+    
+    OpenGLWithBackend mCfg -> do
+      cfg <- loadConfig mCfg
+      state <- newTVarIO (emptyReactorState cfg)
+      putStrLn "Starting DeMoD-Note with OpenGL visualizer and JACK backend..."
+      putStrLn "  • Backend running on audio thread"
+      putStrLn "  • OpenGL running on dedicated render thread"
+      putStrLn "Press ESC in OpenGL window to quit"
+      
+      -- Start backend services in background
+      backendAsync <- async $ runBackend cfg state
+      
+      -- Run OpenGL on dedicated OS thread (required for GL context)
+      -- forkOS binds the thread to a specific OS thread for OpenGL
+      runOpenGLVisualizer defaultOpenGLConfig state
+      
+      -- Cleanup
+      cancel backendAsync
+#else
+    OpenGL _ _ _ -> do
+      putStrLn "OpenGL support not compiled in."
+      putStrLn "Rebuild with -f opengl flag to enable OpenGL visualization."
+    
+    OpenGLWithBackend _ -> do
+      putStrLn "OpenGL support not compiled in."
+      putStrLn "Rebuild with -f opengl flag to enable OpenGL visualization."
+#endif
 
 runNormal :: Maybe FilePath -> Maybe String -> IO ()
 runNormal mCfg mPreset = do
@@ -173,8 +228,8 @@ runWithTUI mCfg = do
   -- Start backend services (JACK, OSC, monitor) in background
   backendAsync <- async $ runBackend cfg state
   
-  -- Run TUI with backend connection
-  runTUI cfg
+  -- Run TUI with backend state connection
+  runTUIWithState cfg state
   
   -- Cleanup
   cancel backendAsync

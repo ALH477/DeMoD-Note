@@ -7,6 +7,11 @@ author:             DeMoD-Note Project
 homepage:           https://github.com/ALH477/DeMoD-Note
 build-type:         Simple
 
+flag opengl
+  description:      Enable OpenGL visualization support
+  default:          False
+  manual:           True
+
 library
   exposed-modules:
     DeMoDNote.Types
@@ -56,6 +61,17 @@ library
     , transformers
     , explicit-exception
   pkgconfig-depends: jack >=1.9, fftw3
+
+  if flag(opengl)
+    exposed-modules:
+      DeMoDNote.Opengl
+    build-depends:
+      , GLFW-b               >=3.3 && <3.5
+      , gl                   >=0.14
+      , dear-imgui           >=2.2
+      , nanovg               >=0.8
+      , zmidi-core           >=0.8
+      , svg-tree             >=0.6
 
 test-suite demod-note-tests
   type:              exitcode-stdio-1.0

@@ -9,8 +9,7 @@ module DeMoDNote.Backend (
     runBackend,
     runBackendSimple,
     JackState(..),
-    newJackState,
-    JackStatus(..)
+    newJackState
 ) where
 
 import DeMoDNote.Types
@@ -55,21 +54,14 @@ logErr :: String -> IO ()
 logErr s = hPutStrLn stderr s >> hFlush stderr
 
 -------------------------------------------------------------------------------
--- JackStatus / JackState
+-- JackState (uses JackStatus from Types.hs)
 -------------------------------------------------------------------------------
 
-data JackStatus 
-    = JackConnected
-    | JackDisconnected
-    | JackReconnecting
-    | JackError String
-    deriving (Show, Eq)
-
 data JackState = JackState
-    { jackStatus           :: !(IORef JackStatus)
-    , reconnectAttempts    :: !(IORef Int)
-    , maxReconnectAttempts :: !Int
-    , shouldReconnect      :: !(IORef Bool)
+    { jsStatus             :: !(IORef JackStatus)
+    , jsReconnectAttempts  :: !(IORef Int)
+    , jsMaxReconnectAttempts :: !Int
+    , jsShouldReconnect    :: !(IORef Bool)
     }
 
 newJackState :: Int -> IO JackState
@@ -148,15 +140,15 @@ reconnectBackoff n = do
 
 attemptReconnect :: JackState -> IO Bool
 attemptReconnect st = do
-    attempts <- readIORef (reconnectAttempts st)
-    maxAttempts <- return $ maxReconnectAttempts st
+    attempts <- readIORef (jsReconnectAttempts st)
+    let maxAttempts = jsMaxReconnectAttempts st
     if attempts >= maxAttempts
         then do
             logErr "Max reconnection attempts reached"
             return False
         else do
             logInfo $ "Reconnection attempt " ++ show (attempts + 1) ++ "..."
-            modifyIORef' (reconnectAttempts st) (+ 1)
+            modifyIORef' (jsReconnectAttempts st) (+ 1)
             reconnectBackoff attempts
             return True
 
@@ -300,7 +292,7 @@ jackSession cfg audioState jackState stateVar = do
     logInfo "Starting JACK client..."
 
     -- Detector thread lives for the lifetime of this JACK session
-    _ <- forkIO $ detectorThread cfg audioState stateVar
+    _ <- forkIO $ detectorThread cfg audioState jackState stateVar
 
     JACK.handleExceptions $
         JACK.withClientDefault "DeMoDNote" $ \client ->
@@ -314,7 +306,7 @@ jackSession cfg audioState jackState stateVar = do
                             
                             Trans.lift $ atomically $ writeTVar (sampleRate audioState) sr
                             Trans.lift $ atomically $ writeTVar (bufferSize audioState) bs
-                            Trans.lift $ writeIORef (jackStatus jackState) JackConnected
+                            Trans.lift $ writeIORef (jsStatus jackState) JackConnected
                             
                             Trans.lift $ logInfo $ "✅ JACK connected (SR=" ++ show sr ++ ", BS=" ++ show bs ++ ")"
                             
@@ -328,13 +320,13 @@ jackSession cfg audioState jackState stateVar = do
 
 jackLoop :: Config -> AudioState -> JackState -> TVar ReactorState -> IO ()
 jackLoop cfg audioState jackState stateVar = do
-    recon    <- readIORef (shouldReconnect jackState)
+    recon    <- readIORef (jsShouldReconnect jackState)
     running' <- atomically $ readTVar (running audioState)
     when (recon && running') $ do
         catch (jackSession cfg audioState jackState stateVar) 
               (\(e :: SomeException) -> do
                 logErr $ "JACK session lost: " ++ show e
-                writeIORef (jackStatus jackState) (JackError "session lost")
+                writeIORef (jsStatus jackState) (JackError "session lost")
                 ok <- attemptReconnect jackState
                 when ok $ jackLoop cfg audioState jackState stateVar)
 
@@ -342,8 +334,8 @@ jackLoop cfg audioState jackState stateVar = do
 -- Detector Thread (exact original)
 -------------------------------------------------------------------------------
 
-detectorThread :: Config -> AudioState -> TVar ReactorState -> IO ()
-detectorThread cfg audioState stateVar = do
+detectorThread :: Config -> AudioState -> JackState -> TVar ReactorState -> IO ()
+detectorThread cfg audioState jackState stateVar = do
     logInfo "Detector thread started."
     loop (0 :: Int)
   where
@@ -366,7 +358,7 @@ detectorThread cfg audioState stateVar = do
                         logErr $ "[Detector] No JACK frames for ~2s (xruns=" ++ show xruns ++ ")"
                     loop (silentTicks + 1)
                 Just () -> do
-                    processFrame cfg audioState stateVar
+                    processFrame cfg audioState jackState stateVar
                     loop 0
 
 sendFinalNoteOff :: AudioState -> IO ()
@@ -380,8 +372,8 @@ sendFinalNoteOff audioState = do
                 Nothing -> return ()
         Nothing -> return ()
 
-processFrame :: Config -> AudioState -> TVar ReactorState -> IO ()
-processFrame cfg audioState stateVar = do
+processFrame :: Config -> AudioState -> JackState -> TVar ReactorState -> IO ()
+processFrame cfg audioState jackState stateVar = do
     let rb = audioRingBuffer audioState
     wp <- readIORef (rbWritePos rb)
     let size = rbSize rb
@@ -413,6 +405,9 @@ processFrame cfg audioState stateVar = do
         
         handleNoteChange audioState (detectedNote result) (noteState result) detTuningNote detTuningCents detTuningInTune
         
+        -- Get current JACK status from the IORef
+        jackSt <- readIORef (jsStatus jackState)
+        
         let newReactorState = ReactorState
               { currentNotes = case detectedNote result of
                   Nothing -> []
@@ -424,6 +419,14 @@ processFrame cfg audioState stateVar = do
               , config = cfg
               , reactorBPM = 120.0
               , reactorThreshold = -40.0
+              -- New fields for TUI integration
+              , jackStatus = jackSt
+              , detectionConfidence = confidence result
+              , detectionLatency = 2.66
+              , latestWaveform = waveform
+              , detectedTuningNote = detTuningNote
+              , detectedTuningCents = detTuningCents
+              , detectedTuningInTune = detTuningInTune
               }
         atomically $ writeTVar stateVar newReactorState
 
@@ -482,11 +485,11 @@ runBackend cfg state = do
     
     _ <- installHandler sigINT (Catch $ do
         atomically $ writeTVar (running audioState) False
-        writeIORef (shouldReconnect jackState) False
+        writeIORef (jsShouldReconnect jackState) False
         logInfo "SIGINT received, shutting down...") Nothing
     _ <- installHandler sigTERM (Catch $ do
         atomically $ writeTVar (running audioState) False  
-        writeIORef (shouldReconnect jackState) False
+        writeIORef (jsShouldReconnect jackState) False
         logInfo "SIGTERM received, shutting down...") Nothing
     
     forkIO $ jackLoop cfg audioState jackState state
