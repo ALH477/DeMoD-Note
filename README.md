@@ -18,6 +18,21 @@ DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor wr
   
 - **Distinct Onset Detection:** Multi-feature onset detection (spectral flux, energy transient, phase deviation) with 0.67 threshold and 1.33ms quantization
 
+- **FluidSynth Integration:**
+  - Built-in audio synthesis via `--synth <soundfont.sf2>`
+  - Low-latency note routing from detection to output
+  - MIDI program/bank selection support
+
+- **Session Recording:**
+  - Record detected notes to protobuf and CSV formats
+  - Timestamped events with velocity, confidence, and tuning data
+  - Perfect for analysis and debugging
+
+- **OpenGL Visualization:**
+  - NanoVG-rendered intro sequence with ASCII art
+  - Real-time note visualization
+  - MIDI file playback with falling notes (optional)
+
 - **Deterministic Architecture:**
   - Single-core dual-thread design (SCHED_FIFO priority 99/98)
   - Lock-free ring buffer with cache-line alignment
@@ -44,13 +59,13 @@ DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor wr
 | Attribute | Value |
 |-----------|-------|
 | **Language** | Haskell (GHC 9.10+) |
-| **Source Code** | 12,302 LOC |
-| **Test Code** | 480 LOC |
-| **Total Code** | 12,782 LOC |
-| **Source Modules** | 14 |
-| **Test Modules** | 8 |
-| **Build Dependencies** | 52 packages |
-| **Test Suite** | **142 tests** (HSpec + QuickCheck) |
+| **Source Code** | ~13,500 LOC |
+| **Test Code** | ~600 LOC |
+| **Total Code** | ~14,100 LOC |
+| **Source Modules** | 17 |
+| **Test Modules** | 11 |
+| **Build Dependencies** | 54 packages |
+| **Test Suite** | **172+ tests** (HSpec + QuickCheck) |
 | **License** | MIT |
 | **Version** | 1.0.0 |
 
@@ -66,6 +81,12 @@ Start with JACK (PipeWire on modern Linux):
 ```bash
 # Using nix (recommended)
 nix run . -- run
+
+# With FluidSynth audio output
+nix run . -- run --synth /path/to/soundfont.sf2
+
+# Record session to file
+nix run . -- run --record myrecording
 
 # Or with TUI
 nix run . -- run -i
@@ -109,6 +130,44 @@ jack_connect DeMoDNote:output system:playback_1
 
 ```bash
 nix develop -c cabal test
+```
+
+## CLI Options
+
+```bash
+# Basic usage
+demod-note run                      # Start detector
+demod-note run --config <file>      # Use custom config
+demod-note run --preset <name>     # Apply preset
+demod-note run --synth <sf2>       # Enable FluidSynth output
+demod-note run --record <file>     # Record session
+
+# Interactive modes
+demod-note run -i                  # Run with TUI
+demod-note tui                      # Launch TUI only
+
+# Other commands
+demod-note list-presets            # List available presets
+demod-note list-scales              # List musical scales
+demod-note show-preset <name>      # Show preset details
+demod-note test-scale <name>       # Test a scale
+demod-note test-arpeggio <root> <quality> <pattern>  # Test arpeggio
+```
+
+## Session Recording
+
+Sessions can be recorded to both protobuf and CSV formats:
+
+```bash
+demod-note run --record mysession
+# Creates: mysession.protobuf and mysession.csv
+```
+
+CSV format:
+```csv
+timestamp_us,event_type,note,velocity,confidence,tuning_cents
+123456,NoteOn,60,100,0.95,0.0
+234567,NoteOff,60,0,0.0,0.0
 ```
 
 ---
@@ -364,19 +423,22 @@ Key settings in `config.toml`:
 
 | Module | Lines | Purpose |
 |--------|-------|---------|
-| TUI | 1414 | Terminal UI with Brick |
-| Opengl | 1248 | OpenGL visualization (optional) |
-| Backend | 507 | JACK audio + OSC handling |
-| DeMoD | 369 | Main application entry point |
-| Detector | 361 | Triple-path pitch detection |
-| Preset | 357 | Preset management |
-| OSC | 312 | OSC control server |
-| BPM | 327 | Tempo/time utilities |
-| Arpeggio | 338 | Chord/note patterns |
-| Scale | 302 | Musical scales |
-| SoundFont | 290 | FluidSynth integration |
-| Config | 168 | TOML parsing |
-| Types | 144 | Core type definitions |
+| Opengl | 1805 | OpenGL visualization + intro (optional) |
+| TUI | 1400+ | Terminal UI with Brick |
+| Backend | 520+ | JACK audio + OSC handling |
+| DeMoD | 370 | Brick TUI intro |
+| Detector | 380 | Triple-path pitch detection |
+| Preset | 360 | Preset management |
+| OSC | 320 | OSC control server |
+| BPM | 340 | Tempo/time utilities |
+| Arpeggio | 345 | Chord/note patterns |
+| Scale | 310 | Musical scales |
+| SoundFont | 295 | FluidSynth integration |
+| Recording | 185 | Session recording (protobuf + csv) |
+| Config | 180 | TOML parsing |
+| Error | 65 | Typed error handling |
+| Types | 155 | Core type definitions |
+| Util | 70 | Common utilities |
 | Monitor | 14 | Web dashboard |
 
 ### Test Coverage
@@ -390,7 +452,10 @@ Key settings in `config.toml`:
 | ConfigSpec | 12+ |
 | PresetSpec | 12+ |
 | AudioValidationSpec | 10+ |
-| **Total** | **142** |
+| BackendSpec | 8+ |
+| OSCSpec | 8+ |
+| SoundFontSpec | 5+ |
+| **Total** | **172+** |
 
 ## Building All Outputs
 
