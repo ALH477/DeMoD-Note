@@ -230,7 +230,8 @@ applyPreset preset cfg = cfg {
         singleCore = presetSingleCore preset,
         priorityAudio = presetPriorityAudio preset,
         priorityDetect = presetPriorityDetect preset
-    }
+    },
+    activePreset = presetName preset
 }
 
 -- Load preset from file (TOML)

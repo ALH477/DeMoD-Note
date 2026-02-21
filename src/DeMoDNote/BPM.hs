@@ -1,3 +1,12 @@
+-- |
+-- Module      : DeMoDNote.BPM
+-- Description : BPM detection, tap tempo, and quantization
+-- Copyright   : 2026
+-- License     : MIT
+--
+-- This module provides BPM detection from tap tempo, beat quantization,
+-- and time signature handling.
+
 module DeMoDNote.BPM (
     BPMState(..),
     TapState(..),

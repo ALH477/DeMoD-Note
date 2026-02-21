@@ -17,6 +17,7 @@ import DeMoDNote.Types
 import DeMoDNote.Config hiding (sampleRate, bufferSize)
 import DeMoDNote.Detector
 import DeMoDNote.OSC
+import DeMoDNote.SoundFont (SoundFontManager, isFluidSynthRunning)
 
 import qualified Sound.JACK as JACK
 import qualified Sound.JACK.Audio as JAudio
@@ -382,16 +383,16 @@ processFrame cfg audioState jackState stateVar = do
     wp <- readIORef (rbWritePos rb)
     let size = rbSize rb
     
-    -- Read last 256 samples
+    -- Read last 256 samples directly into immutable vector (avoids intermediate allocation)
     let startPos = if wp >= 256 then wp - 256 else size - (256 - wp)
-    samples <- forM [0..255] $ \i -> VSM.read (rbMVec rb) ((startPos + i) `mod` size)
-    let samplesVec = VS.fromList samples :: VS.Vector Int16
+    samplesVec <- VS.generateM 256 $ \i -> VSM.read (rbMVec rb) ((startPos + i) `mod` size)
+    let samplesInt = VS.map fromIntegral samplesVec :: VS.Vector Int
     
     when (VS.length samplesVec >= 128) $ do
         currentTime <- getMicroTime
         
-        let !samplesInt = VS.map fromIntegral samplesVec
-            !samplesD = VS.map (\x -> fromIntegral x / 32768.0 :: Double) samplesInt
+        -- Normalize for waveform display
+        let !samplesD = VS.map (\x -> fromIntegral x / 32768.0 :: Double) samplesVec
             !waveform = VS.toList samplesD
         
         result <- detect cfg samplesInt currentTime Idle defaultPLLState defaultOnsetFeatures
@@ -469,8 +470,8 @@ handleNoteChange audioState mNote noteState detTuningNote detTuningCents detTuni
 -- Main Backend Entry Points
 -------------------------------------------------------------------------------
 
-runBackend :: Config -> TVar ReactorState -> IO ()
-runBackend cfg state = do
+runBackend :: Config -> TVar ReactorState -> Maybe SoundFontManager -> IO ()
+runBackend cfg state mSynthManager = do
     logInfo "Starting DeMoD-Note JACK backend..."
     
     started <- startJACKServer
@@ -486,6 +487,15 @@ runBackend cfg state = do
         logErr $ "Could not create OSC client: " ++ show (e :: SomeException)
         return Nothing)
     atomically $ writeTVar (oscClient audioState) mOscClient
+    
+    -- Log FluidSynth status
+    case mSynthManager of
+        Nothing -> logInfo "FluidSynth: disabled"
+        Just sm -> do
+            running <- isFluidSynthRunning sm
+            if running
+                then logInfo "FluidSynth: connected and ready"
+                else logInfo "FluidSynth: not running"
     
     _ <- installHandler sigINT (Catch $ do
         atomically $ writeTVar (running audioState) False

@@ -22,13 +22,16 @@ library
     DeMoDNote.Detector
     DeMoDNote.Backend
     DeMoDNote.OSC
+    DeMoDNote.Error
     DeMoDNote.Monitor
+    DeMoDNote.Recording
     DeMoDNote.Scale
     DeMoDNote.Arpeggio
     DeMoDNote.BPM
     DeMoDNote.Preset
     DeMoDNote.SoundFont
     DeMoDNote.TUI
+    DeMoDNote.Util
   hs-source-dirs:     src
   default-language:   Haskell2010
   ghc-options:        -Wall -O2 -threaded
@@ -63,6 +66,8 @@ library
     , containers
     , transformers
     , explicit-exception
+    , binary
+    , deepseq
   pkgconfig-depends: jack >=1.9, fftw3
 
   if flag(opengl)

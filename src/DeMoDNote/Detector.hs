@@ -53,6 +53,18 @@ hannWindow :: Int -> VS.Vector Double
 hannWindow n = VS.generate n (\i -> 
   0.5 * (1 - cos (2 * pi * fromIntegral i / fromIntegral (n - 1))))
 
+-- | Pre-computed Hann window for 256-sample buffers (used in processFrame)
+hannWindow256 :: VS.Vector Double
+hannWindow256 = hannWindow 256
+
+-- | Pre-computed Hann window for 2048-sample analysis window
+hannWindow2048 :: VS.Vector Double
+hannWindow2048 = hannWindow 2048
+
+-- | Pre-computed Hann window for 4096-sample analysis window
+hannWindow4096 :: VS.Vector Double
+hannWindow4096 = hannWindow 4096
+
 -- | Calculate spectral flux between current and previous magnitude spectra
 -- Spectral flux measures the change in spectral content between frames,
 -- used for onset detection

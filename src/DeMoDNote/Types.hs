@@ -1,3 +1,14 @@
+{-# LANGUAGE BangPatterns #-}
+
+-- |
+-- Module      : DeMoDNote.Types
+-- Description : Core data types for DeMoD-Note
+-- Copyright   : 2026
+-- License     : MIT
+--
+-- This module defines the core data types used throughout DeMoD-Note,
+-- including JACK status, note state machine, and reactor state.
+
 module DeMoDNote.Types where
 
 import DeMoDNote.Config

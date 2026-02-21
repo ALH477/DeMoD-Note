@@ -11,7 +11,9 @@ import DeMoDNote.OSC
 import DeMoDNote.Monitor
 import DeMoDNote.Types
 import DeMoDNote.TUI (runTUI, runTUIWithChannel, runTUIWithState)
-import DeMoDNote.Preset (getPresetByName, listPresets)
+import DeMoDNote.Preset (getPresetByName, listPresets, applyPreset)
+import DeMoDNote.SoundFont (initSoundFontManager, startFluidSynth, isFluidSynthRunning, SoundFontManager)
+import DeMoDNote.Recording (initRecording, startRecording, stopRecording, flushRecording)
 import DeMoDNote.Scale (getScaleByName, allScaleNames)
 import DeMoDNote.Arpeggio (createArpeggio, majorChord, upPattern)
 import qualified DeMoDNote.BPM as BPM
@@ -28,7 +30,7 @@ import qualified Data.Text as T
 import Control.Exception (catch, SomeException)
 
 data Command
-  = Run { cmdConfig :: Maybe FilePath, cmdPreset :: Maybe String, cmdInteractive :: Bool }
+  = Run { cmdConfig :: Maybe FilePath, cmdPreset :: Maybe String, cmdInteractive :: Bool, cmdSynth :: Maybe FilePath, cmdRecord :: Maybe FilePath }
   | TestScale { cmdScale :: String, cmdBPM :: Double, cmdDuration :: Int }
   | TestArpeggio { cmdRoot :: String, cmdQuality :: String, cmdPattern :: String, cmdBPM :: Double }
   | ListPresets
@@ -67,6 +69,8 @@ runCmd = Run
   <$> optional (strOption (long "config" <> short 'c' <> metavar "FILE" <> help "Config file"))
   <*> optional (strOption (long "preset" <> short 'p' <> metavar "NAME" <> help "Preset name"))
   <*> switch (long "interactive" <> short 'i' <> help "Interactive TUI mode")
+  <*> optional (strOption (long "synth" <> short 's' <> metavar "FILE" <> help "SoundFont file for FluidSynth audio output"))
+  <*> optional (strOption (long "record" <> short 'r' <> metavar "FILE" <> help "Record session to file (protobuf+csv)"))
 
 testScaleCmd :: Parser Command
 testScaleCmd = TestScale
@@ -100,10 +104,10 @@ main = do
     (fullDesc <> progDesc "DeMoDNote - Deterministic Monophonic Note Detector")
   
   case cmd of
-    Run mCfg mPreset useTUI -> 
+    Run mCfg mPreset useTUI mSynth mRecord -> 
       if useTUI
       then runWithTUI mCfg
-      else runNormal mCfg mPreset
+      else runNormal mCfg mPreset mSynth mRecord
     
     TestScale scale bpm duration -> do
       putStrLn $ "Testing scale: " ++ scale ++ " at " ++ show bpm ++ " BPM"
@@ -137,7 +141,7 @@ main = do
       cfg <- loadConfig Nothing
       state <- newTVarIO (emptyReactorState cfg)
       putStrLn "Starting DeMoD-Note TUI with JACK backend..."
-      backendAsync <- async $ runBackend cfg state
+      backendAsync <- async $ runBackend cfg state Nothing
       runTUIWithState cfg state
       cancel backendAsync
     
@@ -160,7 +164,7 @@ main = do
       putStrLn "Press ESC in OpenGL window to quit"
       
       -- Start backend services in background
-      backendAsync <- async $ runBackend cfg state
+      backendAsync <- async $ runBackend cfg state Nothing
       
       -- Run OpenGL on dedicated OS thread (required for GL context)
       -- forkOS binds the thread to a specific OS thread for OpenGL
@@ -178,8 +182,8 @@ main = do
       putStrLn "Rebuild with -f opengl flag to enable OpenGL visualization."
 #endif
 
-runNormal :: Maybe FilePath -> Maybe String -> IO ()
-runNormal mCfg mPreset = do
+runNormal :: Maybe FilePath -> Maybe String -> Maybe FilePath -> Maybe FilePath -> IO ()
+runNormal mCfg mPreset mSynth mRecord = do
   cfg <- loadConfig mCfg
   
   -- Apply preset if specified
@@ -187,7 +191,47 @@ runNormal mCfg mPreset = do
     Nothing -> return cfg
     Just presetName -> do
       putStrLn $ "Loading preset: " ++ presetName
-      return cfg  -- Would apply preset
+      mPreset <- getPresetByName presetName
+      case mPreset of
+        Nothing -> do
+          putStrLn $ "Warning: Preset not found: " ++ presetName
+          return cfg
+        Just preset -> do
+          let cfgWithPreset = applyPreset preset cfg
+          putStrLn $ "Applied preset: " ++ presetName
+          putStrLn $ "  Detection: onset=" ++ show (onsetThresh $ detection cfgWithPreset) ++ 
+                      " fast=" ++ show (fastValidationMs $ detection cfgWithPreset) ++ "ms"
+          return cfgWithPreset
+  
+  -- Initialize FluidSynth if soundfont specified
+  synthManager <- case mSynth of
+    Nothing -> do
+      putStrLn "FluidSynth: disabled (no --synth option)"
+      return Nothing
+    Just sfPath -> do
+      putStrLn $ "FluidSynth: initializing with " ++ sfPath
+      manager <- initSoundFontManager
+      manager' <- startFluidSynth manager sfPath
+      running <- isFluidSynthRunning manager'
+      if running
+        then do
+          putStrLn "FluidSynth: started successfully"
+          return (Just manager')
+        else do
+          putStrLn "FluidSynth: failed to start"
+          return Nothing
+  
+  -- Initialize recording if file specified
+  recordingState <- case mRecord of
+    Nothing -> do
+      putStrLn "Recording: disabled (no --record option)"
+      return Nothing
+    Just recPath -> do
+      putStrLn $ "Recording: will save to " ++ recPath
+      let presetName = fromMaybe "default" mPreset
+      rec <- initRecording (T.pack presetName)
+      rec' <- startRecording rec
+      return (Just rec')
   
   state <- newTVarIO (emptyReactorState cfg')
   le <- initLogEnv "demod-note" "production"
@@ -204,7 +248,7 @@ runNormal mCfg mPreset = do
   monitorAsync <- async $ catch (startMonitor (monitorPort cfg') state) $ \e -> do
         handleAsyncError (e :: SomeException)
         return ()
-  backendAsync <- async $ catch (runBackend cfg' state) $ \e -> do
+  backendAsync <- async $ catch (runBackend cfg' state synthManager) $ \e -> do
         handleAsyncError (e :: SomeException)
         return ()
 
@@ -213,6 +257,13 @@ runNormal mCfg mPreset = do
   case result of
     (_, Left e) -> do
         putStrLn $ "Error in main loop: " ++ show e
+    _ -> return ()
+  
+  -- Flush and save recording if active
+  case (mRecord, recordingState) of
+    (Just recPath, Just rec) -> do
+      putStrLn $ "Saving recording to " ++ recPath
+      flushRecording rec recPath
     _ -> return ()
   
   closeScribes logEnv'
@@ -226,7 +277,7 @@ runWithTUI mCfg = do
   putStrLn "Starting DeMoD-Note TUI with JACK backend..."
   
   -- Start backend services (JACK, OSC, monitor) in background
-  backendAsync <- async $ runBackend cfg state
+  backendAsync <- async $ runBackend cfg state Nothing
   
   -- Run TUI with backend state connection
   runTUIWithState cfg state

@@ -1,3 +1,12 @@
+-- |
+-- Module      : DeMoDNote.Scale
+-- Description : Musical scale definitions and utilities
+-- Copyright   : 2026
+-- License     : MIT
+--
+-- This module provides musical scale definitions (major, minor, pentatonic, etc.)
+-- and utilities for note name conversion and scale manipulation.
+
 module DeMoDNote.Scale (
     ScaleType(..),
     Scale(..),

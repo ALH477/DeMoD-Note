@@ -1,6 +1,15 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- |
+-- Module      : DeMoDNote.Config
+-- Description : Configuration types and parsing for DeMoD-Note
+-- Copyright   : 2026
+-- License     : MIT
+--
+-- This module defines configuration data types for detection parameters,
+-- real-time settings, and TOML configuration file parsing.
+
 module DeMoDNote.Config where
 
 import GHC.Generics
@@ -64,6 +73,7 @@ data Config = Config
   , oscPort       :: Int
   , monitorPort   :: Int
   , logLevel      :: String
+  , activePreset  :: String
   } deriving (Show, Generic)
 
 defaultConfig :: Config
@@ -107,6 +117,7 @@ defaultConfig = Config
   , oscPort = 57120
   , monitorPort = 8080
   , logLevel = "Info"
+  , activePreset = "default"
   }
 
 configCodec :: TomlCodec Config
@@ -119,6 +130,7 @@ configCodec = Config
   <*> Toml.int "osc.port" .= oscPort
   <*> Toml.int "monitor.port" .= monitorPort
   <*> Toml.string "logLevel" .= logLevel
+  <*> Toml.string "preset" .= activePreset
 
 detectionCodec :: TomlCodec DetectionConfig
 detectionCodec = DetectionConfig

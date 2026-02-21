@@ -68,6 +68,10 @@ safeTail :: [a] -> [a]
 safeTail []     = []
 safeTail (_:xs) = xs
 
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf _ [] = []
+chunksOf n xs = take n xs : chunksOf n (drop n xs)
+
 clamp :: Ord a => a -> a -> a -> a
 clamp lo hi = max lo . min hi
 
@@ -208,9 +212,9 @@ paletteAttrs Matrix =
     , (heroNoteAttr,    withStyle (fg brightGreen)   bold)
     , (heroOctAttr,     fg green)
     , (tuningGoodAttr,  withStyle (fg brightGreen)   bold)
-    , (tuningBadAttr,   withStyle (fg green)         bold)
+    , (tuningBadAttr,   withStyle (fg yellow)        bold)
     , (jackGoodAttr,    fg brightGreen)
-    , (jackBadAttr,     fg (ISOColor 2))
+    , (jackBadAttr,     withStyle (fg yellow)       bold)
     , (jackWarnAttr,    fg green)
     , (accentAttr,      fg green)
     , (statusAttr,      fg green)
@@ -639,12 +643,11 @@ sectionHeader label =
 
 paletteSelector :: TUIState -> Widget ()
 paletteSelector state =
-    vBox
-        [ padLeft (Pad 2) $ hBox $ intersperse (str "  ") $
-            map (paletteOption state) (take 3 allPalettes)
-        , padLeft (Pad 2) $ hBox $ intersperse (str "  ") $
-            map (paletteOption state) (drop 3 allPalettes)
-        ]
+    let chunkSize = 4
+        rows = chunksOf chunkSize allPalettes
+        renderRow row = padLeft (Pad 2) $ hBox $ intersperse (str "  ") $
+            map (paletteOption state) row
+    in vBox $ map renderRow rows
 
 paletteOption :: TUIState -> ColorPalette -> Widget ()
 paletteOption state p =
@@ -679,7 +682,10 @@ pressEnterWidget state =
             JackReconnecting ->
                 ( if blinkOn then jackWarnAttr else dimAttr
                 , "◐   R E C O N N E C T I N G …" )
-            _                ->
+            JackError msg   ->
+                ( if blinkOn then jackBadAttr else dimAttr
+                , "○   J A C K   E R R O R   ─   " ++ take 20 msg )
+            JackDisconnected ->
                 ( dimAttr
                 , "      W A I T I N G   F O R   J A C K      " )
     in  withAttr atr $ str msg
@@ -1006,8 +1012,8 @@ handleEvent :: BrickEvent () TUIEvent -> EventM () TUIState ()
 handleEvent (AppEvent TUITick) = modify' $ \s ->
     let tick'   = tuiTick s + 1
         flash'  = max 0 (tuiNoteFlash s - 1)
-        -- Peak velocity decays by 1 every 6 ticks (~1.7 sec full decay).
-        peak'   = if tick' `mod` 6 == 0
+        -- Peak velocity decays by 1 every 3 ticks (~0.8 sec full decay ~3 min).
+        peak'   = if tick' `mod` 3 == 0
                     then max 0 (tuiPeakVelocity s - 1)
                     else tuiPeakVelocity s
         -- Status reverts to a context-appropriate idle message when expired.
@@ -1138,7 +1144,7 @@ handleMainEvent (AppEvent (TUIDetection det)) = modify' $ \s ->
 
         mNote = if audioLive then deNote det else Nothing
         hist' = case mNote of
-            Nothing     -> if audioLive then tuiNoteHistory s else []
+            Nothing     -> tuiNoteHistory s  -- preserve history even when disconnected
             Just (n, v) -> take maxNoteHistory ((n, v) : tuiNoteHistory s)
         wave' = if audioLive
                     then take waveformSamples (deWaveform det ++ repeat 0.0)
@@ -1378,8 +1384,10 @@ runTUIWithState cfg stateVar = do
         prev <- readIORef prevRef
         let mNote = case currentNotes rs of { [] -> Nothing; (n:_) -> Just n }
             key   = ( mNote
-                    , noteStateMach rs
-                    , jackStatus    rs   -- JACK drop without note change now propagates
+                    , noteStateMach       rs
+                    , jackStatus          rs
+                    , detectionConfidence rs
+                    , take 8 (latestWaveform rs)  -- sample for change detection
                     )
         when (prev /= Just key) $ do
             writeIORef prevRef (Just key)

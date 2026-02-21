@@ -1,5 +1,14 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
+-- |
+-- Module      : DeMoDNote.Arpeggio
+-- Description : Arpeggio patterns and chord utilities
+-- Copyright   : 2026
+-- License     : MIT
+--
+-- This module provides arpeggio pattern definitions (up, down, broken, etc.)
+-- and chord quality utilities for generating note sequences.
+
 module DeMoDNote.Arpeggio (
     ArpeggioPattern(..),
     Arpeggio(..),

@@ -54,7 +54,7 @@ import Foreign.C.String (withCString)
 import Control.Monad (when, unless, forever, forM_, void)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO, atomically, writeTVar)
 import Control.Concurrent (forkIO, forkOS, threadDelay, ThreadId)
-import Data.IORef
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, unsafePerformIO)
 import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime, utctDayTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Time.LocalTime (timeToTimeOfDay, TimeOfDay(..))
@@ -81,6 +81,7 @@ import qualified Text.SVG.Tree as SVGTree
 import qualified Text.SVG.Types as SVG
 import System.Process (createProcess, proc, std_out, std_err, StdStream(..), ProcessHandle, terminateProcess, waitForProcess)
 import Control.Exception (SomeException, try)
+import Paths_DeMoD_Note (getDataFileName)
 
 -- Import DeMoD-Note types for integration
 import DeMoDNote.Types (ReactorState(..), NoteState(..), MIDINote, Velocity, emptyReactorState, defaultPLLState, defaultOnsetFeatures)
@@ -207,26 +208,44 @@ timeToDepthAndChar utc =
     pad2 n = (if n < 10 then "0" else "") ++ show n
 
 -- =============================================================================
--- Audio Playback (Cross-platform)
+-- Audio Playback (Cross-platform with caching)
 -- =============================================================================
 
+-- | Cache for the working audio player command
+cachedAudioPlayer :: IORef (Maybe (String, [String]))
+cachedAudioPlayer = unsafePerformIO $ newIORef Nothing
+{-# NOINLINE cachedAudioPlayer #-}
+
 spawnIntroAudio :: FilePath -> IO AudioPlayer
-spawnIntroAudio path = tryPlayers candidates
+spawnIntroAudio path = do
+  cached <- readIORef cachedAudioPlayer
+  case cached of
+    Just (cmd, args) -> do
+      result <- try $ createProcess
+        (proc cmd (args ++ [path])) { std_out = CreatePipe, std_err = CreatePipe }
+      case result of
+        Right (_, _, _, ph) -> return (Player ph)
+        Left (_ :: SomeException) -> do
+          writeIORef cachedAudioPlayer Nothing
+          spawnIntroAudio path
+    Nothing -> tryPlayers candidates
   where
     candidates =
-      [ ("mpg123",  ["-q",              path])  -- Linux standard
-      , ("afplay",  [                   path])  -- macOS built-in
-      , ("mplayer", ["-really-quiet",   path])  -- fallback
+      [ ("mpg123",  ["-q"])  -- Linux standard
+      , ("afplay",  [])       -- macOS built-in
+      , ("mplayer", ["-really-quiet"])  -- fallback
       ]
     tryPlayers [] = do
       putStrLn "[OpenGL] WARNING: no audio player found (mpg123/afplay/mplayer). Continuing without audio."
       return NoAudio
     tryPlayers ((cmd, args) : rest) = do
       result <- try $ createProcess
-        (proc cmd args) { std_out = CreatePipe, std_err = CreatePipe }
+        (proc cmd (args ++ [path])) { std_out = CreatePipe, std_err = CreatePipe }
       case result of
         Left  (_ :: SomeException) -> tryPlayers rest
-        Right (_, _, _, ph)        -> return (Player ph)
+        Right (_, _, _, ph)        -> do
+          writeIORef cachedAudioPlayer $ Just (cmd, args)
+          return (Player ph)
 
 stopAudioPlayer :: AudioPlayer -> IO ()
 stopAudioPlayer NoAudio     = return ()
@@ -239,16 +258,6 @@ fadeOutAndStopAudio (Player ph) = void . forkIO $ do
   -- Gradually reduce volume over 0.5 seconds (best effort)
   threadDelay 500000  -- 0.5 second delay before stopping
   void . try @SomeException $ terminateProcess ph >> waitForProcess ph
-
-tryAudioPaths :: [FilePath] -> IO AudioPlayer
-tryAudioPaths [] = do
-  putStrLn "[OpenGL] WARNING: intro.mp3 not found. Continuing without intro audio."
-  return NoAudio
-tryAudioPaths (path:paths) = do
-  exists <- doesFileExist path
-  if exists
-    then spawnIntroAudio path
-    else tryAudioPaths paths
 
 data ShaderSource
   = Embedded !BS.ByteString
@@ -1764,15 +1773,15 @@ runOpenGLVisualizer cfg reactorVar = do
   -- Start intro audio if not skipping
   unless (oglSkipIntro cfg) $ do
     audioPlayer <- case oglMidiFile cfg of
-      -- Use intro.mp3 from data directory
+      -- Use intro.mp3 from data directory via getDataFileName
       Nothing -> do
-        home <- getHomeDirectory
-        let candidates = 
-              [ "/home/asher/DeMoD-Note/assets/intro.mp3"
-              , home </> ".local/share/demod-note/intro.mp3"
-              , "/usr/share/demod-note/intro.mp3"
-              ]
-        tryAudioPaths candidates
+        introPath <- getDataFileName "assets/intro.mp3"
+        exists <- doesFileExist introPath
+        if exists 
+          then spawnIntroAudio introPath
+          else do
+            putStrLn "[OpenGL] WARNING: intro.mp3 not found. Continuing without intro audio."
+            return NoAudio
       Just _ -> return NoAudio  -- Don't play intro if MIDI file specified
     writeIORef audioPlayerRef audioPlayer
 
@@ -1780,9 +1789,6 @@ runOpenGLVisualizer cfg reactorVar = do
   logger "Press F5 to live-reload shaders | SPACE to skip intro | ESC to quit"
 
   mainLoop appState
-
-  -- Cleanup
-  stopAudioPlayer =<< readIORef audioPlayerRef
 
   -- Cleanup
   stopAudioPlayer =<< readIORef audioPlayerRef
