@@ -1,9 +1,9 @@
 cabal-version: 3.0
 name:               DeMoD-Note
-version:            1.0.0
+version:            1.0.1
 synopsis:           Deterministic Monophonic Note Detector
 license:            MIT
-author:             DeMoD-Note Project
+author:             ALH477 (Asher LeRoy)
 homepage:           https://github.com/ALH477/DeMoD-Note
 build-type:         Simple
 
