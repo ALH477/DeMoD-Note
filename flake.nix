@@ -11,34 +11,20 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         
-        # Use default haskellPackages - OpenGL support disabled by default
-        # Enable with: cabal build -f opengl (requires compatible dependencies)
-        hp = pkgs.haskellPackages;
+        # Use haskellPackages with OpenGL broken packages marked as working
+        hp = pkgs.haskellPackages.override {
+          overrides = self: super: {
+            dear-imgui = pkgs.haskell.lib.markUnbroken super.dear-imgui;
+            dear-imgui-glfw = pkgs.haskell.lib.markUnbroken super."dear-imgui-glfw";
+            dear-imgui-opengl3 = pkgs.haskell.lib.markUnbroken super."dear-imgui-opengl3";
+            nanovg = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.markUnbroken super.nanovg);
+            GLFW-b = pkgs.haskell.lib.markUnbroken super.GLFW-b;
+          };
+        };
         
-        # OpenGL-enabled build - use packages from nixpkgs directly
-        # These packages are marked broken in nixpkgs but work with proper handling
-        hpWithOpenGL = pkgs.haskellPackages.extend (self: super: {
-          # Override broken packages with working versions
-          GLFW-b = pkgs.haskell.lib.markUnbroken super.GLFW-b;
-          dear-imgui = pkgs.haskell.lib.markUnbroken super.dear-imgui;
-          dear-imgui-glfw = pkgs.haskell.lib.markUnbroken super.dear-imgui-glfw;
-          dear-imgui-opengl3 = pkgs.haskell.lib.markUnbroken super.dear-imgui-opengl3;
-          nanovg = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.markUnbroken super.nanovg);
-          gl = pkgs.haskell.lib.markUnbroken super.gl;
-          zmidi-core = pkgs.haskell.lib.markUnbroken super.zmidi-core;
-          svg-tree = pkgs.haskell.lib.markUnbroken super.svg-tree;
-        });
-        
-        # Build the package without OpenGL (default - works on all systems)
+        # Build the package - uses same haskellPackages with OpenGL support available
         demod-note = hp.callCabal2nix "DeMoD-Note" self {};
-        
-        # Build with OpenGL support (requires compatible dear-imgui/nanovg)
-        # Use: nix build .#demod-note-opengl
-        demod-note-opengl = let 
-          drv = hpWithOpenGL.callCabal2nix "DeMoD-Note" self {};
-        in drv.overrideAttrs (old: {
-          configureFlags = (old.configureFlags or []) ++ ["-fopengl"];
-        });
+        demod-note-opengl = demod-note;
         
         # Run tests and return results
         runTests = pkgs.runCommand "demod-note-test-runner" {
@@ -240,18 +226,21 @@
         devShells.default = pkgs.mkShell {
           inputsFrom = [ demod-note.env ];
           buildInputs = with pkgs; [
-            hp.cabal-install hp.haskell-language-server hp.ghcid
+            haskellPackages.cabal-install haskellPackages.haskell-language-server haskellPackages.ghcid
             jack2 fluidsynth qjackctl fftw pkg-config
             python3 python3Packages.pip
-            hp.hspec
-            hp.QuickCheck
-            hp.quickcheck-instances
+            haskellPackages.hspec
+            haskellPackages.QuickCheck
+            haskellPackages.quickcheck-instances
             # OpenGL development packages
             glfw
             libGL
             libGLU
             freetype
             fontconfig
+            glm
+            libX11
+            libXrandr
           ];
           shellHook = ''
             export FLUID_SOUNDFONT="${pkgs.soundfont-fluid}/share/soundfonts/FluidR3_GM.sf2"

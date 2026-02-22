@@ -220,8 +220,7 @@ quantizeToGrid state time = do
     grid <- atomically $ readTVar (quantization state)
     if grid == QOff
        then return time
-       else do
-            let bpm = targetBPM state
+       else let bpm = targetBPM state
                 beatMs = 60000.0 / bpm
                 gridMs = beatMs * getGridDivision grid
                 timeMs = fromIntegral time / 1000.0 :: Double
@@ -244,10 +243,9 @@ quantizeNoteOnset state onsetTime = do
         division = getGridDivision grid
     if division == 0
        then return onsetTime
-       else do
-           let quantizedPos = fromIntegral (round (posInMeasure / division :: Double) :: Int) * division :: Double
-               offsetMs = (quantizedPos - posInMeasure) * beatMs
-           in return $ onsetTime + round (offsetMs * 1000 :: Double) :: IO Word64
+       else let quantizedPos = fromIntegral (round (posInMeasure / division :: Double) :: Int) * division :: Double
+                offsetMs = (quantizedPos - posInMeasure) * beatMs
+            in return $ onsetTime + round (offsetMs * 1000 :: Double) :: IO Word64
 
 -- Get current beat position
 getBeatPosition :: BPMState -> IO Double

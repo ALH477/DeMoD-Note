@@ -38,7 +38,7 @@ import qualified Data.ByteString.Lazy as BL
 import Control.Concurrent.STM
 import Control.Concurrent (forkIO, threadDelay, Chan, newChan, writeChan, readChan)
 import Control.Exception (try, SomeException, finally)
-import Control.Monad (forever)
+import Control.Monad (forever, when)
 import Data.IORef
 import qualified Sound.Osc.Transport.Fd as Fd
 import Sound.Osc.Transport.Fd.Udp (Udp(..), with_udp, udpServer)
