@@ -14,7 +14,6 @@ module DeMoDNote.Config where
 
 import GHC.Generics
 import Toml
-import qualified Toml.Codec.Combinator as Toml
 import Control.Exception (Exception, throwIO)
 
 data ConfigException = ConfigParseError String

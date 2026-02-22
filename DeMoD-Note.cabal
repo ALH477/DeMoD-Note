@@ -25,6 +25,7 @@ library
     DeMoDNote.Error
     DeMoDNote.Monitor
     DeMoDNote.Recording
+    DeMoDNote.Export
     DeMoDNote.Scale
     DeMoDNote.Arpeggio
     DeMoDNote.BPM

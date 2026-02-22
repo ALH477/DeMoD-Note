@@ -144,7 +144,7 @@ findZeroCrossing samples = go 0 (VS.length samples - 1)
 -- Uses the explicit prevEnergy field to track RMS energy across frames,
 -- enabling proper energy transient detection (|ΔRMS| between frames).
 updateOnsetFeatures :: Config -> VS.Vector Double -> Double -> OnsetFeatures -> OnsetFeatures
-updateOnsetFeatures cfg curr currRms prevFeatures =
+updateOnsetFeatures cfg _curr currRms prevFeatures =
   let prevRms  = prevEnergy prevFeatures     -- previous frame's RMS
       et       = abs (currRms - prevRms)     -- energy transient |ΔRMS|
       -- Spectral flux needs the raw previous frame vector for a proper

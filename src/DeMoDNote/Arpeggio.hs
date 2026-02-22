@@ -13,7 +13,6 @@ module DeMoDNote.Arpeggio (
     ArpeggioPattern(..),
     Arpeggio(..),
     ChordQuality(..),
-    arpChord,
     createArpeggio,
     getArpeggioNotes,
     getArpeggioWithRhythm,
@@ -45,7 +44,6 @@ module DeMoDNote.Arpeggio (
 
 import DeMoDNote.Scale (NoteName(..), noteNameToMidi, Scale(..), ScaleType(..))
 import System.Random (randomRIO)
-import Data.List (permutations)
 
 -- Safe list indexing - returns Nothing if index out of bounds
 safeIndex :: [a] -> Int -> Maybe a
@@ -333,15 +331,15 @@ allArpeggioPatterns = [
     "walking-bass", "fingerpicking"
     ]
 
--- Shuffle for random pattern (IO)
-shuffleIO :: [a] -> IO [a]
-shuffleIO [] = return []
-shuffleIO (x:[]) = return [x]
-shuffleIO xs = do
+-- Shuffle for random pattern (IO) - currently unused but available for future use
+_shuffleIO :: [a] -> IO [a]
+_shuffleIO [] = return []
+_shuffleIO (x:[]) = return [x]
+_shuffleIO xs = do
     i <- randomRIO (0, length xs - 1)
     let (left, right) = splitAt i xs
     case right of
-      [] -> shuffleIO xs  -- Retry if we somehow got an empty right part
+      [] -> _shuffleIO xs  -- Retry if we somehow got an empty right part
       (x':right') -> do
-        rest <- shuffleIO (left ++ right')
+        rest <- _shuffleIO (left ++ right')
         return $ x' : rest

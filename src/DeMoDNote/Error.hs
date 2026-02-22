@@ -10,7 +10,7 @@ module DeMoDNote.Error (
     throwDeMoD
 ) where
 
-import Control.Exception (Exception, SomeException, try, catch, handle, throw)
+import Control.Exception (Exception, try, throw)
 import Data.Typeable (Typeable)
 
 data DeMoDError

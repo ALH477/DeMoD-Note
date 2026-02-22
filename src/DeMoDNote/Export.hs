@@ -33,9 +33,9 @@ module DeMoDNote.Export (
 
 import DeMoDNote.Recording (Session(..), RecordedEvent(..), EventType(..))
 
-import Data.Word (Word8, Word16, Word32)
+import Data.Word (Word8, Word16, Word32, Word64)
 import Data.Int (Int16, Int32)
-import Data.Bits (shiftR, (.&.))
+import Data.Bits (shiftR, (.&.), (.|.))
 import Data.List (sortOn)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import qualified Data.Text as T
@@ -143,7 +143,7 @@ buildMidiTrack config@MidiExportConfig{..} session =
         midiEvents = sessionEventsToMidi config sortedEvents usToTicks
         
         -- Add tempo event at start and end-of-track at end
-        tempoUs = 60000000 `div` midiTempo
+        tempoUs = fromIntegral (60000000 `div` midiTempo :: Int) :: Int32
         allEvents = (0, TempoEvent tempoUs) 
                   : (0, ProgramChangeEvent midiChannel midiProgram)
                   : midiEvents
@@ -178,9 +178,9 @@ pitchBendFromCents channel cents =
         -- Full range (±8192) = ±pitchBendRange semitones
         -- 1 semitone = 100 cents
         defaultRange = 2 :: Float  -- Default 2 semitones
-        bendValue = round (cents * 8192 / (defaultRange * 100))
-        clamped = max (-8192) (min 8191 bendValue)
-    in PitchBendEvent channel (fromIntegral clamped)
+        bendValue = round (cents * 8192 / (defaultRange * 100)) :: Int
+        clamped = max (-8192) (min 8191 bendValue) :: Int
+    in PitchBendEvent channel (fromIntegral clamped :: Int16)
 
 -- | Encode complete MIDI file
 encodeMidiFile :: MidiHeader -> [MidiTrack] -> BSL.ByteString
@@ -354,7 +354,9 @@ groupNoteEvents evts = go (sortOn timestamp evts) []
     go (e:es) acc = case eventType e of
         NoteOn -> 
             let matchingOff = findNoteOff (note e) es
-                remaining = maybe es (\off -> filter (/= off) es) matchingOff
+                remaining = case matchingOff of
+                    Just off -> filter (\x -> timestamp x /= timestamp off) es
+                    Nothing -> es
             in go remaining ((e, matchingOff) : acc)
         _ -> go es acc
     

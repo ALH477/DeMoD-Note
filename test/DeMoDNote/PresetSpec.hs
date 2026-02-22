@@ -1,7 +1,6 @@
 module DeMoDNote.PresetSpec where
 
 import Test.Hspec
-import Test.QuickCheck
 import DeMoDNote.Preset
 import DeMoDNote.Config
 

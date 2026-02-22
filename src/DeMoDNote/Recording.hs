@@ -18,21 +18,17 @@ module DeMoDNote.Recording (
 ) where
 
 import Data.Word (Word64, Word8)
-import Data.Int (Int64)
-import Data.Time (getCurrentTime, UTCTime(..), NominalDiffTime, Day(..))
+import Data.Time (getCurrentTime, UTCTime(..))
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
 import Data.Time.Format (formatTime, defaultTimeLocale)
 import Data.List (intercalate)
-import Control.Concurrent (MVar, newMVar, takeMVar, putMVar)
-import Control.Monad (when)
-import Data.Maybe (fromMaybe)
+import Control.Concurrent (MVar, newMVar)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Data.Binary (Binary(..), encode)
-import Data.Binary.Put (putWord64le, putWord8, putLazyByteString)
+import Data.Binary.Put (putWord64le, putWord8)
 import Data.Binary.Get (Get, getWord64le, getWord8)
-import Control.DeepSeq (NFData)
 
 data EventType = NoteOn | NoteOff | Detection
     deriving (Show, Eq, Generic)
@@ -75,12 +71,12 @@ data Session = Session
     } deriving (Show, Generic)
 
 instance Binary Session where
-  put (Session sid ss preset evts) = do
+  put (Session sid ss presetVal evts) = do
     put sid
     -- Store full POSIX timestamp with microsecond precision
     let posixTs = round (utcTimeToPOSIXSeconds ss * 1e6) :: Word64
     put posixTs
-    put preset
+    put presetVal
     put evts
   get = Session <$> get <*> (posixMicrosToUTCTime <$> (get :: Get Word64)) <*> get <*> get
     where
@@ -100,16 +96,16 @@ data RecordingState = RecordingState
     }
 
 initRecording :: T.Text -> IO RecordingState
-initRecording preset = do
+initRecording presetName = do
     now <- getCurrentTime
-    sessionId <- T.pack . formatTime defaultTimeLocale "%Y%m%d-%H%M%S" <$> getCurrentTime
+    newSessionId <- T.pack . formatTime defaultTimeLocale "%Y%m%d-%H%M%S" <$> getCurrentTime
     mv <- newMVar ()
     return $ RecordingState
         { recEnabled = False
         , recEvents = []
-        , recSessionId = sessionId
+        , recSessionId = newSessionId
         , recStartTime = now
-        , recPreset = preset
+        , recPreset = presetName
         , recMVar = mv
         }
 
@@ -141,14 +137,14 @@ getTimestamp :: UTCTime -> Word64
 getTimestamp ut = floor $ utcTimeToPOSIXSeconds ut * 1000000
 
 recordEvent :: RecordingState -> EventType -> Int -> Int -> Float -> Float -> IO RecordingState
-recordEvent rec et note vel conf tc = do
+recordEvent rec et noteVal vel conf tc = do
     if recEnabled rec
         then do
             now <- getCurrentTime
             let evt = RecordedEvent 
                     { timestamp = getTimestamp now - getTimestamp (recStartTime rec)
                     , eventType = et
-                    , note = fromIntegral note
+                    , note = fromIntegral noteVal
                     , velocity = fromIntegral vel
                     , confidence = conf
                     , tuningCents = tc

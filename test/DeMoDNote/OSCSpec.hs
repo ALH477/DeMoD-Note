@@ -6,8 +6,6 @@ import DeMoDNote.OSC
 import Sound.Osc
 import Sound.Osc.Datum
 import Data.Int (Int32)
-import Data.Word (Word32)
-import Foreign.C.Types (CFloat)
 
 spec :: Spec
 spec = do

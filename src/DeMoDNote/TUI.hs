@@ -9,7 +9,7 @@ import Brick.Widgets.Border.Style
 import Brick.Widgets.Center
 import Graphics.Vty
 import Graphics.Vty.CrossPlatform (mkVty)
-import Graphics.Vty.Config (defaultConfig)
+import qualified Graphics.Vty.Config as VtyConfig
 import Control.Concurrent (Chan, forkIO, readChan, threadDelay)
 import Control.Concurrent.STM (atomically, readTVar, TVar)
 import Control.Exception (SomeException, catch)
@@ -1417,7 +1417,7 @@ runTUIWithState cfg stateVar = do
                     , deJackStatus   = jackStatus          rs
                     }
             writeBChan bc (TUIDetection det)
-    let buildVty = mkVty defaultConfig
+    let buildVty = mkVty VtyConfig.defaultConfig
     initVty <- buildVty
     void $ customMain initVty buildVty (Just bc) tuiApp initSt
 
@@ -1431,6 +1431,6 @@ runTUIWithChannel cfg mChan = do
         Just chan -> supervisedForkIO $ forever $ do
             ev <- readChan chan
             writeBChan bc (TUIDetection ev)
-    let buildVty = mkVty defaultConfig
+    let buildVty = mkVty VtyConfig.defaultConfig
     initVty <- buildVty
     void $ customMain initVty buildVty (Just bc) tuiApp initSt

@@ -221,12 +221,12 @@ quantizeToGrid state time = do
     if grid == QOff
        then return time
        else do
-           let bpm = targetBPM state
-               beatMs = 60000.0 / bpm
-               gridMs = beatMs * getGridDivision grid
-               timeMs = fromIntegral time / 1000.0
-               gridTime = fromIntegral (round (timeMs / gridMs)) * gridMs
-           return $ round (gridTime * 1000)
+            let bpm = targetBPM state
+                beatMs = 60000.0 / bpm
+                gridMs = beatMs * getGridDivision grid
+                timeMs = fromIntegral time / 1000.0 :: Double
+                gridTime = fromIntegral (round (timeMs / gridMs :: Double) :: Int) * gridMs :: Double
+            in return $ round (gridTime * 1000 :: Double) :: IO Word64
 
 -- Quantize a note onset to the beat grid
 quantizeNoteOnset :: BPMState -> Word64 -> IO Word64
@@ -245,9 +245,9 @@ quantizeNoteOnset state onsetTime = do
     if division == 0
        then return onsetTime
        else do
-           let quantizedPos = fromIntegral (round (posInMeasure / division)) * division
+           let quantizedPos = fromIntegral (round (posInMeasure / division :: Double) :: Int) * division :: Double
                offsetMs = (quantizedPos - posInMeasure) * beatMs
-           return $ onsetTime + round (offsetMs * 1000)
+           in return $ onsetTime + round (offsetMs * 1000 :: Double) :: IO Word64
 
 -- Get current beat position
 getBeatPosition :: BPMState -> IO Double
@@ -284,18 +284,17 @@ autoDetectBPM state onsets =
         then return Nothing
         else do
             -- Find most common interval (mode)
-            let _avgInterval = fromIntegral (sum validIntervals) / fromIntegral (length validIntervals)
-                -- Try to detect if intervals are consistent with a tempo
-                intervalsMs = map (\i -> fromIntegral i / 1000.0) validIntervals
+            let -- Try to detect if intervals are consistent with a tempo
+                intervalsMs = map (\i -> fromIntegral i / 1000.0 :: Double) validIntervals
                 bpms = map (\ms -> 60000.0 / ms) intervalsMs
-                avgBPM = sum bpms / fromIntegral (length bpms)
+                avgBPM = sum bpms / fromIntegral (length bpms) :: Double
                 -- Round to reasonable BPM
-                roundedBPM = fromIntegral (round (avgBPM / 0.5)) * 0.5
+                roundedBPM = fromIntegral (round (avgBPM / 0.5 :: Double) :: Int) * 0.5 :: Double
                 clampedBPM = max minBPM (min maxBPM roundedBPM)
             
             -- Calculate confidence based on consistency
-            let variance = sum (map (\b -> (b - avgBPM)^2) bpms) / fromIntegral (length bpms)
-                conf = max 0.0 (1.0 - variance / 100.0)
+            let variance = sum (map (\b -> (b - avgBPM)^2) bpms) / fromIntegral (length bpms) :: Double
+                conf = max 0.0 (1.0 - variance / 100.0 :: Double) :: Double
             
             atomically $ do
                 writeTVar (onsetHistory state) onsets

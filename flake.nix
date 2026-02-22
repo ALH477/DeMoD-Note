@@ -15,23 +15,30 @@
         # Enable with: cabal build -f opengl (requires compatible dependencies)
         hp = pkgs.haskellPackages;
         
-        # OpenGL-enabled build (use when dear-imgui/nanovg are fixed upstream)
-        hpWithOpenGL = pkgs.haskellPackages.override {
-          overrides = self: super: {
-            dear-imgui = pkgs.haskell.lib.markUnbroken super.dear-imgui;
-            dear-imgui-glfw = pkgs.haskell.lib.markUnbroken super.dear-imgui-glfw;
-            dear-imgui-opengl3 = pkgs.haskell.lib.markUnbroken super.dear-imgui-opengl3;
-            nanovg = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.markUnbroken super.nanovg);
-            GLFW-b = pkgs.haskell.lib.markUnbroken super.GLFW-b;
-          };
-        };
+        # OpenGL-enabled build - use packages from nixpkgs directly
+        # These packages are marked broken in nixpkgs but work with proper handling
+        hpWithOpenGL = pkgs.haskellPackages.extend (self: super: {
+          # Override broken packages with working versions
+          GLFW-b = pkgs.haskell.lib.markUnbroken super.GLFW-b;
+          dear-imgui = pkgs.haskell.lib.markUnbroken super.dear-imgui;
+          dear-imgui-glfw = pkgs.haskell.lib.markUnbroken super.dear-imgui-glfw;
+          dear-imgui-opengl3 = pkgs.haskell.lib.markUnbroken super.dear-imgui-opengl3;
+          nanovg = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.markUnbroken super.nanovg);
+          gl = pkgs.haskell.lib.markUnbroken super.gl;
+          zmidi-core = pkgs.haskell.lib.markUnbroken super.zmidi-core;
+          svg-tree = pkgs.haskell.lib.markUnbroken super.svg-tree;
+        });
         
         # Build the package without OpenGL (default - works on all systems)
         demod-note = hp.callCabal2nix "DeMoD-Note" self {};
         
         # Build with OpenGL support (requires compatible dear-imgui/nanovg)
         # Use: nix build .#demod-note-opengl
-        demod-note-opengl = hpWithOpenGL.callCabal2nix "DeMoD-Note" self {};
+        demod-note-opengl = let 
+          drv = hpWithOpenGL.callCabal2nix "DeMoD-Note" self {};
+        in drv.overrideAttrs (old: {
+          configureFlags = (old.configureFlags or []) ++ ["-fopengl"];
+        });
         
         # Run tests and return results
         runTests = pkgs.runCommand "demod-note-test-runner" {
@@ -164,6 +171,7 @@
           windows = windows;
           static = pkgs.pkgsMusl.haskellPackages.callCabal2nix "DeMoD-Note" self {};
           desktop = desktop;
+          demod-note-opengl = demod-note-opengl;
           # Test outputs
           tests = runTests;
           test-coverage = testCoverage;
@@ -242,6 +250,8 @@
             glfw
             libGL
             libGLU
+            freetype
+            fontconfig
           ];
           shellHook = ''
             export FLUID_SOUNDFONT="${pkgs.soundfont-fluid}/share/soundfonts/FluidR3_GM.sf2"

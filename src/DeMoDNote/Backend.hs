@@ -20,7 +20,6 @@ import DeMoDNote.Config hiding (sampleRate, bufferSize)
 import DeMoDNote.Detector
 import DeMoDNote.OSC
 import DeMoDNote.SoundFont (SoundFontManager, isFluidSynthRunning, stopFluidSynth)
-import DeMoDNote.Recording (RecordingState, recordEvent, EventType(..))
 
 import qualified Sound.JACK as JACK
 import qualified Sound.JACK.Audio as JAudio
@@ -34,14 +33,14 @@ import Foreign.C.Error (Errno(..))
 import Foreign.C.Types (CFloat(..))
 import Foreign.Marshal.Array (copyArray)
 import Foreign.Ptr (Ptr, castPtr)
-import Foreign.Storable (sizeOf, peekElemOff)
+import Foreign.Storable (peekElemOff)
 
 import Control.Concurrent (threadDelay, forkIO, killThread, MVar, newEmptyMVar, tryTakeMVar, tryPutMVar, ThreadId)
 import Control.Concurrent.STM
 import Control.Exception (try, SomeException, catch, Exception)
 -- Note: DeMoDNote.Error provides typed error handling (DeMoDError).
 -- Consider migrating SomeException usage to typed errors for better error handling.
-import Control.Monad (forM, forM_, when, unless, forever, void)
+import Control.Monad (forM_, when, forever, void)
 import Data.Int (Int16)
 import Data.IORef
 import Data.Word (Word64)

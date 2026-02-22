@@ -32,19 +32,18 @@ module DeMoDNote.OSC (
 
 import Sound.Osc
 import Sound.Osc.Datum
-import Network.Socket hiding (send, sendTo, recv, recvFrom)
+import Network.Socket hiding (send, recv)
 import Network.Socket.ByteString (sendTo)
 import qualified Data.ByteString.Lazy as BL
 import Control.Concurrent.STM
 import Control.Concurrent (forkIO, threadDelay, Chan, newChan, writeChan, readChan)
-import Control.Exception (try, SomeException, catch, finally, bracket)
-import Control.Monad (forever, when)
+import Control.Exception (try, SomeException, finally)
+import Control.Monad (forever)
 import Data.IORef
 import qualified Sound.Osc.Transport.Fd as Fd
 import Sound.Osc.Transport.Fd.Udp (Udp(..), with_udp, udpServer)
-import System.IO (hFlush, hPutStrLn, stderr, stdout)
+import System.IO (hPutStrLn, stderr)
 
-import DeMoDNote.Config
 import DeMoDNote.Preset
 import DeMoDNote.Types
 

@@ -3,11 +3,7 @@ module DeMoDNote.BackendSpec where
 import Test.Hspec
 import Test.QuickCheck
 import DeMoDNote.Backend
-import DeMoDNote.Types
-import DeMoDNote.Config
-import Control.Concurrent.STM (readTVarIO)
 import Data.IORef (readIORef)
-import Foreign.C.Types (CFloat(..))
 
 spec :: Spec
 spec = do
