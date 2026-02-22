@@ -1,8 +1,8 @@
-# DeMoD-Note
+# Ulation Engine
 
 **Deterministic Monophonic Note Detector**
 
-DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor written in Haskell. It performs hybrid pitch detection from live audio input with deterministic timing guarantees optimized for real-time kernels. Outputs note events via OSC (UDP 57120) for integration with synthesizers like SuperCollider, FluidSynth, or any OSC-compatible audio software.
+Ulation Engine is a pre production-grade, ultra-low-latency real-time audio processor written in Haskell. It performs hybrid pitch detection from live audio input with deterministic timing guarantees optimized for real-time kernels. Outputs note events via OSC (UDP 57120) for integration with synthesizers like SuperCollider, FluidSynth, or any OSC-compatible audio software.
 
 ![output](https://github.com/user-attachments/assets/e28a6be8-e75b-403d-9d23-0b2886b5b774)
 
