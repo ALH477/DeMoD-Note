@@ -67,35 +67,44 @@ DeMoD-Note is a production-grade, ultra-low-latency real-time audio processor wr
 | **Build Dependencies** | 54 packages |
 | **Test Suite** | **172+ tests** (HSpec + QuickCheck) |
 | **License** | MIT |
-| **Version** | 1.0.0 |
+| **Version** | 1.0.1 |
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/ALH477/DeMoD-Note.git
 cd DeMoD-Note
-nix run . -- --help
 ```
 
 Start with JACK (PipeWire on modern Linux):
 ```bash
-# Using nix (recommended)
-nix run . -- run
+# Using nix (recommended) - builds and runs
+nix run .#demod-note -- run
 
-# With FluidSynth audio output
-nix run . -- run --synth /path/to/soundfont.sf2
+# Or enter development shell for more control
+nix develop
+cabal run -- run
 
-# Record session to file
-nix run . -- run --record myrecording
-
-# Or with TUI
-nix run . -- run -i
-# or
-nix run . -- tui
-```
 
 Connect your audio source to `DeMoDNote:input` and `DeMoDNote:output` to your speakers/recorder.
 <img width="1410" height="930" alt="image" src="https://github.com/user-attachments/assets/17085d12-b0ae-439a-ac78-9844f6823263" />
+
+## Building with OpenGL Support
+
+DeMoD-Note supports optional OpenGL visualization. To build with OpenGL enabled:
+
+```bash
+# Build with OpenGL visualization
+nix build .#demod-note-opengl
+
+# Run the OpenGL build
+./result/bin/demod-note run
+```
+
+Note: OpenGL builds require the following system packages:
+- GLFW3, libGL, libGLU
+- freetype, fontconfig
+- glm, libX11, libXrandr
 
 ### PipeWire Users (NixOS, Fedora, etc.)
 
@@ -117,7 +126,7 @@ Look for `DeMoDNote:input` and `DeMoDNote:output` ports in your patchbay.
 Start JACK with 48kHz sample rate (default):
 ```bash
 jackd -d alsa -r 48000 -p 256 &
-nix run . -- -- run
+nix run .#demod-note -- run
 ```
 
 Use QjackCtl or `jack_connect` to route audio:
@@ -129,7 +138,11 @@ jack_connect DeMoDNote:output system:playback_1
 ## Running Tests
 
 ```bash
+# Using nix develop
 nix develop -c cabal test
+
+# Or directly
+cabal test
 ```
 
 ## CLI Options
@@ -152,6 +165,25 @@ demod-note list-scales              # List musical scales
 demod-note show-preset <name>      # Show preset details
 demod-note test-scale <name>       # Test a scale
 demod-note test-arpeggio <root> <quality> <pattern>  # Test arpeggio
+```
+
+## Building All Outputs
+
+```bash
+# Default package (Linux)
+nix build .#demod-note
+
+# With OpenGL visualization
+nix build .#demod-note-opengl
+
+# AppImage (portable Linux executable)
+nix build .#appimage
+
+# NixOS module
+nix build .#nixos
+
+# Tests
+nix build .#tests
 ```
 
 ## Session Recording
@@ -457,20 +489,41 @@ Key settings in `config.toml`:
 | SoundFontSpec | 5+ |
 | **Total** | **172+** |
 
-## Building All Outputs
+# Development
+
+## Enter Development Shell
 
 ```bash
+# Enter development environment with all dependencies
+nix develop
+
+# Or specify the system explicitly
+nix develop .#devShells.x86_64-linux.default
+```
+
+Once in the shell, you can use standard Cabal commands:
+```bash
+cabal build        # Build the project
+cabal test         # Run tests
+cabal haddock      # Generate documentation
+cabal repl         # REPL for development
+```
+
+```bash
+# Default package (Linux)
+nix build .#demod-note
+
+# With OpenGL visualization
+nix build .#demod-note-opengl
+
 # AppImage (portable Linux executable)
 nix build .#appimage
 
-# Windows executable (.exe)
-nix build .#windows
+# NixOS module
+nix build .#nixos
 
-# Static Linux binary
-nix build .#static
-
-# Default package
-nix build
+# Tests
+nix build .#tests
 ```
 
 ## Real-Time System Requirements
