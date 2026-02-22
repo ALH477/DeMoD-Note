@@ -4,6 +4,8 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    # For haskell-nix support, users can add this input themselves and override
+    # the demod-note definition to use haskell-nix.project' instead
   };
 
   outputs = { self, nixpkgs, flake-utils }:
@@ -11,19 +13,20 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         
-        # Use haskellPackages with OpenGL broken packages marked as working
-        hp = pkgs.haskellPackages.override {
-          overrides = self: super: {
-            dear-imgui = pkgs.haskell.lib.markUnbroken super.dear-imgui;
-            dear-imgui-glfw = pkgs.haskell.lib.markUnbroken super."dear-imgui-glfw";
-            dear-imgui-opengl3 = pkgs.haskell.lib.markUnbroken super."dear-imgui-opengl3";
-            nanovg = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.markUnbroken super.nanovg);
-            GLFW-b = pkgs.haskell.lib.markUnbroken super.GLFW-b;
+        # Static nix file approach (default - no IFD issues)
+        # Uses pre-generated DeMoD-Note.nix to avoid Import From Derivation
+        demod-note = let
+          hp = pkgs.haskellPackages.override {
+            overrides = self: super: {
+              dear-imgui = pkgs.haskell.lib.markUnbroken super.dear-imgui;
+              dear-imgui-glfw = pkgs.haskell.lib.markUnbroken super."dear-imgui-glfw";
+              dear-imgui-opengl3 = pkgs.haskell.lib.markUnbroken super."dear-imgui-opengl3";
+              nanovg = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.markUnbroken super.nanovg);
+              GLFW-b = pkgs.haskell.lib.markUnbroken super.GLFW-b;
+            };
           };
-        };
+        in hp.callPackage (import ./DeMoD-Note.nix) {};
         
-        # Build the package - uses same haskellPackages with OpenGL support available
-        demod-note = hp.callCabal2nix "DeMoD-Note" self {};
         demod-note-opengl = demod-note;
         
         # Run tests and return results
@@ -109,9 +112,16 @@
           extraPkgs = p: [ p.jack2 p.fluidsynth p.alsa-lib ];
         };
 
-        windows = (pkgs.pkgsCross.mingwW64.haskellPackages.callCabal2nix "DeMoD-Note" self {}).overrideAttrs (old: {
-          configureFlags = old.configureFlags or [] ++ ["--enable-executable-static"];
-        });
+        # Cross-compiled Windows version (x86_64-linux only)
+        windows = if system == "x86_64-linux" 
+          then (pkgs.pkgsCross.mingwW64.callPackage (import ./DeMoD-Note.nix) {}).overrideAttrs (old: {
+            configureFlags = old.configureFlags or [] ++ ["--enable-executable-static"];
+          }) else pkgs.throw "Windows build only supported on x86_64-linux";
+
+        # Static musl build (x86_64-linux only)
+        static = if system == "x86_64-linux"
+          then pkgs.pkgsMusl.callPackage (import ./DeMoD-Note.nix) {}
+          else pkgs.throw "Static build only supported on x86_64-linux";
 
         desktop = pkgs.runCommand "demod-note-desktop" {
           nativeBuildInputs = [ pkgs.makeWrapper ];
