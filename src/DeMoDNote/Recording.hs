@@ -19,10 +19,9 @@ module DeMoDNote.Recording (
 
 import Data.Word (Word64, Word8)
 import Data.Int (Int64)
-import Data.Time (getCurrentTime, UTCTime(..), NominalDiffTime)
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import System.Locale (defaultTimeLocale)
-import Data.Time.Format (formatTime)
+import Data.Time (getCurrentTime, UTCTime(..), NominalDiffTime, Day(..))
+import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
+import Data.Time.Format (formatTime, defaultTimeLocale)
 import Data.List (intercalate)
 import Control.Concurrent (MVar, newMVar, takeMVar, putMVar)
 import Control.Monad (when)
@@ -30,9 +29,9 @@ import Data.Maybe (fromMaybe)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as T
 import GHC.Generics (Generic)
-import Data.Binary (Binary(..))
+import Data.Binary (Binary(..), encode)
 import Data.Binary.Put (putWord64le, putWord8, putLazyByteString)
-import Data.Binary.Get (getWord64le, getWord8, getRemainingLazyBytes)
+import Data.Binary.Get (Get, getWord64le, getWord8)
 import Control.DeepSeq (NFData)
 
 data EventType = NoteOn | NoteOff | Detection
@@ -76,12 +75,13 @@ data Session = Session
     } deriving (Show, Generic)
 
 instance Binary Session where
-    put (Session sid ss preset evts) = do
-        put sid
-        put ss
-        put preset
-        put evts
-    get = Session <$> get <*> get <*> get <*> get
+  put (Session sid ss preset evts) = do
+    put sid
+    let posixTs = floor (utcTimeToPOSIXSeconds ss) :: Word64
+    put posixTs
+    put preset
+    put evts
+  get = Session <$> get <*> (posixSecondsToUTCTime . fromIntegral <$> (get :: Get Word64)) <*> get <*> get
 
 data RecordingState = RecordingState
     { recEnabled     :: !Bool

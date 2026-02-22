@@ -40,7 +40,7 @@ import DeMoDNote.Types
 -- sample rate (44100 or 48000 Hz).  All frequency↔sample conversions that were
 -- using `detectorSampleRate` now take `sr = detSampleRate cfg` as a parameter.
 detSampleRate :: Config -> Double
-detSampleRate = fromIntegral . sampleRate  -- adjust field path per Config definition
+detSampleRate = fromIntegral . sampleRate . timing
 
 -- | Buffer size hint (128 samples = ~2.9 ms @ 44100 Hz).
 -- The actual buffer length passed to detect may differ.
@@ -141,20 +141,12 @@ findZeroCrossing samples = go 0 (VS.length samples - 1)
 
 -- | Update onset features for the current frame.
 --
--- BUG FIXED: the original passed `currDouble` as BOTH curr and prev arguments
--- inside `detect`, so spectralFlux and energyTransient were always 0.0 and
--- onset detection was permanently disabled.
---
--- FIX (without requiring Types.hs change): The `phaseDeviation` field —
--- previously hardcoded to 0.5 — is repurposed here to carry the current
--- frame's RMS energy forward so the next frame can compute a real |ΔRMS|.
---
--- TODO (Types.hs): replace the phaseDeviation carrier with an explicit
---   prevEnergy :: !Double  field in OnsetFeatures.
+-- Uses the explicit prevEnergy field to track RMS energy across frames,
+-- enabling proper energy transient detection (|ΔRMS| between frames).
 updateOnsetFeatures :: Config -> VS.Vector Double -> Double -> OnsetFeatures -> OnsetFeatures
 updateOnsetFeatures cfg curr currRms prevFeatures =
-  let prevRms  = phaseDeviation prevFeatures  -- previous frame's RMS (carried via field)
-      et       = abs (currRms - prevRms)      -- energy transient |ΔRMS|
+  let prevRms  = prevEnergy prevFeatures     -- previous frame's RMS
+      et       = abs (currRms - prevRms)     -- energy transient |ΔRMS|
       -- Spectral flux needs the raw previous frame vector for a proper
       -- half-wave rectified bin-difference.  Without storing prev samples we
       -- approximate with the scalar energy delta; a correct implementation
@@ -165,8 +157,9 @@ updateOnsetFeatures cfg curr currRms prevFeatures =
   in OnsetFeatures
        { spectralFlux    = sf
        , energyTransient = et
-       , phaseDeviation  = currRms  -- carry forward for next frame
+       , phaseDeviation  = 0.0  -- placeholder; actual phase deviation unused
        , combinedScore   = combined
+       , prevEnergy      = currRms  -- carry forward for next frame
        }
 
 -- | True when the combined onset score exceeds the configured threshold

@@ -24,6 +24,7 @@ import Katip
 import Control.Concurrent.Async
 import Control.Concurrent.STM
 import Control.Concurrent (forkIO, forkOS, threadDelay, readChan, newChan, writeChan, Chan)
+import Data.Maybe (fromMaybe)
 import System.Exit
 import System.IO (stdout)
 import qualified Data.Text as T

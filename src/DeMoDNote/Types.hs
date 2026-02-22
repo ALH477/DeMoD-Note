@@ -40,10 +40,11 @@ data OnsetFeatures = OnsetFeatures
   , energyTransient:: {-# UNPACK #-} !Double
   , phaseDeviation :: {-# UNPACK #-} !Double
   , combinedScore  :: {-# UNPACK #-} !Double
+  , prevEnergy     :: {-# UNPACK #-} !Double
   } deriving (Show, Eq)
 
 defaultOnsetFeatures :: OnsetFeatures
-defaultOnsetFeatures = OnsetFeatures 0.0 0.0 0.0 0.0
+defaultOnsetFeatures = OnsetFeatures 0.0 0.0 0.0 0.0 0.0
 
 data PLLState = PLLState
   { pllFrequency :: {-# UNPACK #-} !Double
@@ -61,6 +62,8 @@ data DetectionResult = DetectionResult
   , confidence   :: {-# UNPACK #-} !Double
   , noteState    :: !NoteState
   , needsBend    :: Maybe (MIDINote, Double)  -- (targetNote, bendAmountSemitones)
+  , pllState     :: !PLLState
+  , onsetState   :: !OnsetFeatures
   } deriving (Show)
 
 -- Tuning state for chromatic tuner

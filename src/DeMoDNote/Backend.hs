@@ -1,5 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE TypeApplications #-}
 
 module DeMoDNote.Backend (
     module DeMoDNote.Types,
@@ -39,7 +41,7 @@ import Control.Concurrent.STM
 import Control.Exception (try, SomeException, catch, Exception)
 -- Note: DeMoDNote.Error provides typed error handling (DeMoDError).
 -- Consider migrating SomeException usage to typed errors for better error handling.
-import Control.Monad (forM, forM_, when, unless, forever)
+import Control.Monad (forM, forM_, when, unless, forever, void)
 import Data.Int (Int16)
 import Data.IORef
 import Data.Word (Word64)
@@ -465,7 +467,7 @@ processFrame cfg audioState jackState stateVar = do
               { currentNotes        = maybe [] (:[]) (detectedNote result)
               , noteStateMach       = noteState result
               , pllStateMach        = pllState  result   -- persist PLL state
-              , onsetFeatures       = onsetFeat result   -- persist onset features
+              , onsetFeatures       = onsetState result  -- persist onset features
               , lastOnsetTime       = currentTime
               , config              = cfg
               , reactorBPM          = prevRS `seq` reactorBPM prevRS -- preserve tap BPM
