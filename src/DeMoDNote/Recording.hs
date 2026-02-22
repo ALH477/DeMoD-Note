@@ -77,11 +77,18 @@ data Session = Session
 instance Binary Session where
   put (Session sid ss preset evts) = do
     put sid
-    let posixTs = floor (utcTimeToPOSIXSeconds ss) :: Word64
+    -- Store full POSIX timestamp with microsecond precision
+    let posixTs = round (utcTimeToPOSIXSeconds ss * 1e6) :: Word64
     put posixTs
     put preset
     put evts
-  get = Session <$> get <*> (posixSecondsToUTCTime . fromIntegral <$> (get :: Get Word64)) <*> get <*> get
+  get = Session <$> get <*> (posixMicrosToUTCTime <$> (get :: Get Word64)) <*> get <*> get
+    where
+      posixMicrosToUTCTime :: Word64 -> UTCTime
+      posixMicrosToUTCTime us = 
+        let secs = fromIntegral (us `div` 1000000)
+            micros = fromIntegral (us `mod` 1000000) / 1e6
+        in posixSecondsToUTCTime (secs + micros)
 
 data RecordingState = RecordingState
     { recEnabled     :: !Bool

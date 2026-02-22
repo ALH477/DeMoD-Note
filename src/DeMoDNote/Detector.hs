@@ -226,7 +226,10 @@ detectFastFreq :: Double           -- ^ sample rate (Hz)
                -> Maybe (Double, Double)
 detectFastFreq sr samples =
   let crossings = findAllZeroCrossings samples
-      periods   = zipWith (-) (tail crossings) crossings
+      -- Safe handling: need at least 2 crossings to compute periods
+      periods   = case crossings of
+                    (_:t:rest) -> zipWith (-) (t:rest) crossings
+                    _          -> []
   in if length periods < 2
      then Nothing
      else
